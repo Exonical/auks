@@ -55,6 +55,24 @@ jobs:
         if: always()
         run: docker compose down -v
 
+  compose-tests-rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build test image
+        run: docker compose build
+
+      - name: Start Rust plugin services
+        run: AUKS_SPANK_IMPL=rust docker compose up -d
+
+      - name: Run Rust Slurm integration tests
+        run: docker compose exec -T slurm bats /tests/slurm_rust.bats
+
+      - name: Stop test services
+        if: always()
+        run: docker compose down -v
+
   rust:
     runs-on: ubuntu-latest
     steps:
@@ -63,7 +81,7 @@ jobs:
       - name: Install Kerberos and bindgen dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libkrb5-dev libclang-dev
+          sudo apt-get install -y libkrb5-dev libclang-dev libslurm-dev
 
       - uses: dtolnay/rust-toolchain@1.98.1
         with:

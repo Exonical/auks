@@ -18,6 +18,13 @@ install -d -o slurm -g slurm /var/spool/slurmctld /var/spool/slurmd /var/log/slu
 
 kinit -k -t /etc/krb5.keytab -c FILE:/tmp/krb5cc_0 "$HOST_PRINCIPAL"
 
+if [ "${AUKS_SPANK_IMPL:-c}" = rust ]
+then
+    printf '%s\n' \
+        'required /usr/local/lib/slurm/auks_rs.so conf=/conf/auks.conf default=disabled' \
+        > /etc/slurm/plugstack.conf
+fi
+
 slurmctld -Dvvv > /var/log/slurm/slurmctld.log 2>&1 &
 slurmd -Dvvv > /var/log/slurm/slurmd.log 2>&1 &
 
