@@ -22,8 +22,7 @@ jobs:
             libtirpc-dev \
             flex \
             bison \
-            libslurm-dev \
-            libclang-dev
+            libslurm-dev
 
       - name: Build
         run: |

@@ -289,5 +289,5 @@ is silently dropped if not executable rather than rejected at config time.
 | A2 namespaces with `job_container/tmpfs` | compose test with a `job_container.conf`; compare ccache path visibility from a task |
 | A2 KEYRING ownership | `keyctl show` from a task on a `KEYRING:`-default host |
 | A3 fd leak | `ls -l /proc/<renewer>/fd` during a step |
-| A11 `--auks=no` propagation | fixed in Rust plugin (Phase 1c); C plugin unchanged |
+| A11 `--auks=no` propagation | fixed in Rust plugin (Phase 1c), pinned by `tests/slurm_rust.bats`; C behaviour still pinned by `tests/slurm.bats` |
 | A4 libkrb5 recreate behaviour | `strace -f` the store under `force_file_ccache` |

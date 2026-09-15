@@ -27,19 +27,15 @@ pub fn parse_option(value: &str) -> Option<Mode> {
 }
 
 /// Decides the mode using option, environment, and configuration precedence.
-pub fn decide(remote: bool, option: Option<Mode>, env: Option<&str>, default: Mode) -> Mode {
+pub fn decide(option: Option<Mode>, env: Option<&str>, default: Mode) -> Mode {
     if let Some(option) = option {
         return option;
     }
-    if remote {
-        match env {
-            Some("yes") => Mode::Enabled,
-            Some("done") => Mode::Done,
-            Some(_) => Mode::Disabled,
-            None => default,
-        }
-    } else {
-        env.and_then(parse_option).unwrap_or(default)
+    match env {
+        Some("yes") => Mode::Enabled,
+        Some("done") => Mode::Done,
+        Some(_) => Mode::Disabled,
+        None => default,
     }
 }
 
@@ -51,7 +47,7 @@ pub fn decide_for_spank(spank: Spank, config: &PluginConfig) -> Mode {
     } else {
         std::env::var("SLURM_SPANK_AUKS").ok()
     };
-    decide(spank.remote(), option, env.as_deref(), config.default_mode)
+    decide(option, env.as_deref(), config.default_mode)
 }
 
 #[cfg(test)]
@@ -61,20 +57,15 @@ mod tests {
     #[test]
     fn option_precedes_environment() {
         assert_eq!(
-            decide(true, Some(Mode::Disabled), Some("yes"), Mode::Enabled),
+            decide(Some(Mode::Disabled), Some("yes"), Mode::Enabled),
             Mode::Disabled
         );
+        assert_eq!(decide(None, Some("yes"), Mode::Disabled), Mode::Enabled);
         assert_eq!(
-            decide(true, None, Some("yes"), Mode::Disabled),
-            Mode::Enabled
-        );
-        assert_eq!(
-            decide(true, None, Some("unexpected"), Mode::Enabled),
+            decide(None, Some("unexpected"), Mode::Enabled),
             Mode::Disabled
         );
-        assert_eq!(
-            decide(false, None, Some("done"), Mode::Disabled),
-            Mode::Done
-        );
+        assert_eq!(decide(None, Some("done"), Mode::Disabled), Mode::Done);
+        assert_eq!(decide(None, Some("bogus"), Mode::Enabled), Mode::Disabled);
     }
 }
