@@ -76,7 +76,6 @@ RUN dnf -y install dnf-plugins-core \
         libjwt \
         libtool \
         make \
-        munge \
         numactl-libs \
         procps-ng \
         shadow-utils \
