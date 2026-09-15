@@ -941,6 +941,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires a krb5.conf auth_to_local rule for root@ATHENA.MIT.EDU"]
     fn root_maps_to_local_name() {
         let context = Context::new().unwrap();
         let principal = context.parse_name("root@ATHENA.MIT.EDU").unwrap();
