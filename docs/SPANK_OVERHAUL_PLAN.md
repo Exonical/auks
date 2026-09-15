@@ -44,6 +44,10 @@ subset of the API (~25 functions), so we own the binding:
   `aname_to_localname`. Every `krb5_error_code` becomes a typed error
   carrying `krb5_get_error_message`.
 
+`krb5-rs` (Exonical fork) re-evaluated 2026-09: AS/TGS + KRB-PRIV/CRED ASN.1
+types present, no ccache/keytab I/O, no AP exchange/sendauth, no renewal;
+revisit when those land.
+
 ### D2. Wire compatibility is a hard requirement for Phases 1-4
 
 `auks-proto` re-implements `auks_buffer`/`auks_message` byte-for-byte
@@ -207,8 +211,8 @@ follow-up.
 
 ### Phase 1 — Rust foundations + plugin skeleton
 
-* `auks-krb5-sys`, `auks-krb5`, `auks-proto`, `auks-cred` with unit tests
-  against the golden vectors.
+* `auks-krb5-sys`, `auks-krb5`, ~~`auks-proto`, `auks-cred` with unit tests
+  against the golden vectors~~ done (Phase 1a PR).
 * `auks-spank` exporting the SPANK ABI (D3) and implementing **only** mode
   decision + `spank_setenv` passthrough; loaded by the compose Slurm to
   prove the ABI, option registration (`--auks=`), `plugstack.conf` parsing

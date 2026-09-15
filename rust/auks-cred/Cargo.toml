@@ -1,0 +1,12 @@
+[package]
+name = "auks-cred"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+auks-proto = { path = "../auks-proto" }
+thiserror = "2"
+
+[lints]
+workspace = true
