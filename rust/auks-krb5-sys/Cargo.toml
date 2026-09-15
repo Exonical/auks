@@ -1,0 +1,13 @@
+[package]
+name = "auks-krb5-sys"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+links = "krb5"
+build = "build.rs"
+
+[build-dependencies]
+bindgen = "0.73.2"
+
+[lints]
+workspace = true

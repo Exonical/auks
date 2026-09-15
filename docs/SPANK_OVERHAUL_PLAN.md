@@ -211,8 +211,11 @@ follow-up.
 
 ### Phase 1 — Rust foundations + plugin skeleton
 
-* `auks-krb5-sys`, `auks-krb5`, ~~`auks-proto`, `auks-cred` with unit tests
-  against the golden vectors~~ done (Phase 1a PR).
+* ~~`auks-krb5-sys`, `auks-krb5`~~ done (Phase 1b PR);
+  `auks-proto`, `auks-cred` with unit tests against the golden vectors are
+  done (Phase 1a PR).
+  * Deferred to Phase 2/3: AuthStream (`sendauth`/`recvauth`/`mk_priv`), TGT
+    renewal, address deletion, and cross-realm credential operations.
 * `auks-spank` exporting the SPANK ABI (D3) and implementing **only** mode
   decision + `spank_setenv` passthrough; loaded by the compose Slurm to
   prove the ABI, option registration (`--auks=`), `plugstack.conf` parsing
