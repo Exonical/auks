@@ -54,6 +54,15 @@ Requires: libtirpc
 # Compiled with pam module as default (disable using --without pam)
 %bcond_without pam
 
+# Rust SPANK plugin is opt-in.
+%bcond_with rust
+
+%if %{with rust}
+BuildRequires: cargo
+BuildRequires: rust
+BuildRequires: clang-devel
+%endif
+
 %description
 Auks is an open source project that helps Batch Systems to provide
 Kerberos Credential Support.
@@ -96,7 +105,7 @@ BuildRequires: pam-devel
 
 %build
 autoreconf -fvi
-%configure CFLAGS="${CFLAGS} -DSYSCONFDIR=\\\"%{_auks_sysconfdir}\\\"" %{?with_slurm:--with-slurm} %{?with_pam:--with-pam}
+%configure CFLAGS="${CFLAGS} -DSYSCONFDIR=\\\"%{_auks_sysconfdir}\\\"" %{?with_slurm:--with-slurm} %{?with_pam:--with-pam} %{?with_rust:--enable-rust}
 make %{?_smp_mflags}
 
 %install
@@ -167,6 +176,9 @@ install -D -m644 src/plugins/slurm/slurm-spank-auks.conf ${RPM_BUILD_ROOT}/etc/s
 %defattr(-,root,root,-)
 /etc/slurm/plugstack.conf.d/auks.conf.example
 %{_libdir}/slurm/auks.so
+%if %{with rust}
+%{_libdir}/slurm/auks_rs.so
+%endif
 %{_mandir}/man8/auks.so.8*
 %endif
 

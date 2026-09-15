@@ -1,0 +1,2 @@
+The Rust Slurm SPANK plugin is optional and can be built alongside the C
+plugin with `./configure --with-slurm --enable-rust`.

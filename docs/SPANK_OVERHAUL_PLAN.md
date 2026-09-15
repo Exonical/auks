@@ -221,7 +221,8 @@ follow-up.
   compose Slurm to prove the ABI, option registration (`--auks=`),
   `plugstack.conf` parsing and logging. Rust `auks_rs.so` behaves as a no-op
   with `default=disabled`.
-* Autotools `--enable-rust` plumbing; RPM builds both artefacts.
+* ~~Autotools `--enable-rust` plumbing; RPM builds both artefacts.~~ done
+  (Phase 2, packaging slice); Rust sources remain outside `make dist`.
 
 ### Phase 2 — Rust plugin at parity, C plugin retired
 
