@@ -127,13 +127,15 @@ our child, so D5 must not rely on `waitpid` for shutdown confirmation
 
 ### D5. Renewer as a supervised child
 
-`std::process::Command` with `pre_exec` doing `setsid()` and a
-`close_range(3, ~0)` sweep (Rust already sets `CLOEXEC` on fds it opens;
-inherited `slurmstepd` fds do not get that for free), `stdio` to
-`/dev/null`, env limited to `KRB5CCNAME`, `AUKS_CONF`, `PATH`. Handle kept
-as a pidfd (`pidfd_open`, Linux ≥ 5.3; fallback pid + `/proc/<pid>/stat`
-start-time check). Shutdown: `SIGTERM`, wait ≤ 5 s, `SIGKILL`. The Rust
-`auks -R loop` handles `SIGTERM` and exits without touching the ccache.
+✅ Implemented in the Rust plugin with a supervised direct child: a
+`pipe2(O_CLOEXEC)` exec-status handshake, `setsid()`, signal reset,
+`close_range(3, ~0)` with a fallback descriptor sweep, `/dev/null` standard
+descriptors, and an environment limited to `KRB5CCNAME`, `AUKS_CONF`, and
+`PATH`. Shutdown sends `SIGTERM`, waits up to five seconds, then sends
+`SIGKILL` if needed. Pidfd tracking is intentionally deferred because this
+implementation supervises the renewer as its direct child with `waitpid`.
+The Rust `auks -R loop` handles `SIGTERM` and exits without touching the
+ccache.
 
 ### D6. Fail loudly
 
