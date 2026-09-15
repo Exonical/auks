@@ -8,7 +8,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Mutex;
 
 use auks_client::Client;
-use auks_config::parse_file;
+use auks_config::{ClientConfig, parse_file};
 use auks_krb5::{Context, cred_blob};
 use auks_spank_sys as sys;
 
@@ -171,23 +171,26 @@ fn set_process_env_if_unset(name: &str, value: &str) {
     }
 }
 
-fn configured_client(config: &PluginConfig, use_host_ccache: bool) -> Result<Client, String> {
+fn configured_client(
+    config: &PluginConfig,
+    use_host_ccache: bool,
+) -> Result<(Client, ClientConfig), String> {
     let path = config
         .conf_file
         .clone()
         .or_else(|| std::env::var_os("AUKS_CONF").map(|value| value.to_string_lossy().into_owned()))
-        .unwrap_or_else(|| "/etc/auks/auks.conf".to_owned());
+        .unwrap_or_else(|| format!("{}/auks.conf", env!("AUKS_SYSCONFDIR")));
     let parsed = parse_file(&path).map_err(|error| error.to_string())?;
-    let client = Client::new(parsed.client);
-    Ok(
-        match use_host_ccache
-            .then_some(config.hostcredcache.as_deref())
-            .flatten()
-        {
-            Some(name) => client.with_ccache(name),
-            None => client,
-        },
-    )
+    let client_config = parsed.client;
+    let client = Client::new(client_config.clone());
+    let client = match use_host_ccache
+        .then_some(config.hostcredcache.as_deref())
+        .flatten()
+    {
+        Some(name) => client.with_ccache(name),
+        None => client,
+    };
+    Ok((client, client_config))
 }
 
 fn local_user_init(spank: Spank) -> c_int {
@@ -201,7 +204,7 @@ fn local_user_init(spank: Spank) -> c_int {
         mode::Mode::Enabled => {}
     }
     let client = match configured_client(&plugin_config, false) {
-        Ok(client) => client,
+        Ok((client, _)) => client,
         Err(error) => {
             log::error(&format!("spank-auks-rs: API init failed: {error}"));
             return -1;
@@ -242,8 +245,9 @@ fn make_file_ccache(uid: u32, jobid: u32) -> Result<String, String> {
     let mut bytes = template.into_bytes_with_nul();
     let old_mask = unsafe { libc::umask((libc::S_IRWXG | libc::S_IRWXO) as libc::mode_t) };
     let fd = unsafe { libc::mkstemp(bytes.as_mut_ptr().cast()) };
-    let restore = unsafe { libc::umask(old_mask) };
-    let _ = restore;
+    unsafe {
+        libc::umask(old_mask);
+    }
     if fd < 0 {
         return Err(io::Error::last_os_error().to_string());
     }
@@ -287,13 +291,14 @@ fn remote_init(spank: Spank) -> c_int {
             return -1;
         }
     };
-    let client = match configured_client(&plugin_config, true) {
-        Ok(client) => client,
+    let (client, client_config) = match configured_client(&plugin_config, true) {
+        Ok(result) => result,
         Err(error) => {
             log::error(&format!("spank-auks-rs: API init failed: {error}"));
             return -1;
         }
     };
+    let helper_script = client_config.helper_script.clone();
     let cred = match client.get_cred(uid) {
         Ok(cred) => cred,
         Err(error) => {
@@ -355,18 +360,8 @@ fn remote_init(spank: Spank) -> c_int {
         spank
             .setenv("KRB5CCNAME", &name, true)
             .map_err(|error| format!("unable to set KRB5CCNAME: {error}"))?;
-        let config_path = plugin_config
-            .conf_file
-            .clone()
-            .or_else(|| {
-                std::env::var_os("AUKS_CONF").map(|value| value.to_string_lossy().into_owned())
-            })
-            .unwrap_or_else(|| "/etc/auks/auks.conf".to_owned());
-        if let Some(script) = parse_file(config_path)
-            .ok()
-            .and_then(|parsed| parsed.client.helper_script)
-        {
-            run_helper(&script, &name, uid, gid)?;
+        if let Some(script) = helper_script.as_deref() {
+            run_helper(script, &name, uid, gid)?;
         }
         Ok(Some((name, file_cache)))
     });
