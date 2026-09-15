@@ -32,6 +32,7 @@ jobs:
           make -C src/plugins/slurm clean
           make -C src/plugins/slurm \
             CFLAGS="-Wall -Wextra -Wformat=2 -Werror"
+          rust/golden/regen.sh
 
   compose-tests:
     runs-on: ubuntu-latest
@@ -53,3 +54,28 @@ jobs:
       - name: Stop test services
         if: always()
         run: docker compose down -v
+
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+
+      - name: Check formatting
+        working-directory: rust
+        run: cargo fmt --check
+
+      - name: Run clippy
+        working-directory: rust
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Run tests
+        working-directory: rust
+        run: cargo test
