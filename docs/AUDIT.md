@@ -194,7 +194,8 @@ and installs a ccache + renewer in the step. Only `SLURM_SPANK_AUKS=no` in
 the job environment actually disables it. The inverse holds with
 `default=disabled`: `--auks=yes` forwards the credential but the step never
 retrieves it. Fix: export `SLURM_SPANK_AUKS=<value>` from the option
-callback in the local context (D3 in the plan).
+callback in the local context (D3 in the plan). Fixed in the Rust plugin
+(Phase 1c); the C plugin is unchanged.
 
 ---
 
@@ -288,5 +289,5 @@ is silently dropped if not executable rather than rejected at config time.
 | A2 namespaces with `job_container/tmpfs` | compose test with a `job_container.conf`; compare ccache path visibility from a task |
 | A2 KEYRING ownership | `keyctl show` from a task on a `KEYRING:`-default host |
 | A3 fd leak | `ls -l /proc/<renewer>/fd` during a step |
-| A11 `--auks=no` propagation | done — `tests/slurm.bats` |
+| A11 `--auks=no` propagation | fixed in Rust plugin (Phase 1c); C plugin unchanged |
 | A4 libkrb5 recreate behaviour | `strace -f` the store under `force_file_ccache` |

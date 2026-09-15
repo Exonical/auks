@@ -46,6 +46,8 @@ services:
     hostname: slurm
     domainname: example.com
     command: bash -xe /usr/local/bin/entrypoint_slurm.sh
+    environment:
+      AUKS_SPANK_IMPL: ${AUKS_SPANK_IMPL:-c}
     volumes:
       - type: bind
         source: ./tests/

@@ -216,10 +216,10 @@ follow-up.
   done (Phase 1a PR).
   * Deferred to Phase 2/3: AuthStream (`sendauth`/`recvauth`/`mk_priv`), TGT
     renewal, address deletion, and cross-realm credential operations.
-* `auks-spank` exporting the SPANK ABI (D3) and implementing **only** mode
-  decision + `spank_setenv` passthrough; loaded by the compose Slurm to
-  prove the ABI, option registration (`--auks=`), `plugstack.conf` parsing
-  and logging. Deliverable: Rust `auks.so` loads and behaves as a no-op
+* ~~`auks-spank` exporting the SPANK ABI (D3) and implementing **only** mode
+  decision + `spank_setenv` passthrough~~ done (Phase 1c PR); loaded by the
+  compose Slurm to prove the ABI, option registration (`--auks=`),
+  `plugstack.conf` parsing and logging. Rust `auks_rs.so` behaves as a no-op
   with `default=disabled`.
 * Autotools `--enable-rust` plumbing; RPM builds both artefacts.
 
