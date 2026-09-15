@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["auks-proto", "auks-cred"]
+members = ["auks-proto", "auks-cred", "auks-krb5-sys", "auks-krb5"]
 
 [workspace.package]
 edition = "2024"
