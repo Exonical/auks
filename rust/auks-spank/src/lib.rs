@@ -761,7 +761,7 @@ fn task_exit(spank: Spank) -> c_int {
     log::info(&format!(
         "spank-auks-rs: all tasks exited, killing credential renewer (pid={pid})"
     ));
-    let timed_out = match as_user(uid, gid, || {
+    let result = as_user(uid, gid, || {
         sync_files(&mut state);
         if unsafe { libc::kill(pid, libc::SIGTERM) } != 0 {
             return Err(io::Error::last_os_error());
@@ -769,7 +769,7 @@ fn task_exit(spank: Spank) -> c_int {
         for _ in 0..50 {
             let result = unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) };
             if result == pid {
-                return Ok(false);
+                return Ok(());
             }
             if result < 0 {
                 let error = io::Error::last_os_error();
@@ -786,17 +786,14 @@ fn task_exit(spank: Spank) -> c_int {
         if unsafe { libc::waitpid(pid, std::ptr::null_mut(), 0) } < 0 {
             return Err(io::Error::last_os_error());
         }
-        Ok(true)
-    }) {
-        Ok(value) => value,
-        Err(error) => {
-            state.renewer_pid = None;
-            log::error(&format!("spank-auks-rs: unable to stop renewer: {error}"));
-            return -1;
-        }
-    };
+        Ok(())
+    })
+    .and_then(|inner| inner);
     state.renewer_pid = None;
-    let _ = timed_out;
+    if let Err(error) = result {
+        log::error(&format!("spank-auks-rs: unable to stop renewer: {error}"));
+        return -1;
+    }
     0
 }
 
