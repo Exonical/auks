@@ -41,6 +41,16 @@ pub fn decide(option: Option<Mode>, env: Option<&str>, default: Mode) -> Mode {
 
 /// Decides a mode from a SPANK handle and plugin configuration.
 pub fn decide_for_spank(spank: Spank, config: &PluginConfig) -> Mode {
+    if let Some(minimum_uid) = config.minimum_uid {
+        let uid = if spank.remote() {
+            spank.job_uid().ok()
+        } else {
+            Some(unsafe { libc::geteuid() as u32 })
+        };
+        if uid.is_some_and(|uid| uid < minimum_uid) {
+            return Mode::Disabled;
+        }
+    }
     let option = OPTION_MODE.lock().ok().and_then(|guard| *guard);
     let env = if spank.remote() {
         spank.getenv("SLURM_SPANK_AUKS")

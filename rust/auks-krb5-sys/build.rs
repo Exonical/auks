@@ -61,7 +61,7 @@ fn main() {
         )
         .allowlist_type("krb5_.*")
         .allowlist_var(
-            "(KRB5_AUTH_CONTEXT_.*|AP_OPTS_.*|KDC_OPT_.*|KRB5_TC_.*|KRB5_NT_.*|KRB5_GC_.*|KRB5_FCC_NOFILE|KRB5_CC_.*|KRB5KRB_.*|KRB5_RC_.*|KRB5_NO_TKT_SUPPLIED|KRB5_TGS_NAME.*)",
+            "(ADDRTYPE_INET|KRB5_AUTH_CONTEXT_.*|AP_OPTS_.*|KDC_OPT_.*|KRB5_TC_.*|KRB5_NT_.*|KRB5_GC_.*|KRB5_FCC_NOFILE|KRB5_CC_.*|KRB5KRB_.*|KRB5_RC_.*|KRB5_NO_TKT_SUPPLIED|KRB5_TGS_NAME.*)",
         )
         .derive_default(true)
         .derive_debug(true)

@@ -3,8 +3,12 @@ use super::mode::Mode;
 /// Parsed plugstack configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PluginConfig {
+    /// Optional AUKS configuration file.
+    pub conf_file: Option<String>,
     /// AUKS synchronization mode.
     pub sync: Option<String>,
+    /// Optional host credential cache used for remote GET requests.
+    pub hostcredcache: Option<String>,
     /// Default AUKS mode.
     pub default_mode: Mode,
     /// Whether stack credential publication is enabled.
@@ -22,7 +26,9 @@ pub struct PluginConfig {
 impl Default for PluginConfig {
     fn default() -> Self {
         Self {
+            conf_file: None,
             sync: None,
+            hostcredcache: None,
             default_mode: Mode::Disabled,
             spankstackcred: false,
             enforced: false,
@@ -38,7 +44,9 @@ pub fn parse(args: &[String]) -> (PluginConfig, Vec<String>) {
     let mut config = PluginConfig::default();
     let mut unknown = Vec::new();
     for argument in args {
-        if let Some(value) = argument.strip_prefix("sync=") {
+        if let Some(value) = argument.strip_prefix("conf=") {
+            config.conf_file = Some(value.to_owned());
+        } else if let Some(value) = argument.strip_prefix("sync=") {
             config.sync = Some(value.to_owned());
         } else if let Some(value) = argument.strip_prefix("default=") {
             config.default_mode = match value {
@@ -63,7 +71,8 @@ pub fn parse(args: &[String]) -> (PluginConfig, Vec<String>) {
             } else {
                 unknown.push(argument.clone());
             }
-        } else if argument.starts_with("conf=") {
+        } else if let Some(value) = argument.strip_prefix("hostcredcache=") {
+            config.hostcredcache = Some(value.to_owned());
         } else {
             unknown.push(argument.clone());
         }
@@ -91,8 +100,10 @@ mod tests {
         .collect::<Vec<_>>();
         let (config, unknown) = parse(&args);
         assert_eq!(config.default_mode, Mode::Enabled);
+        assert_eq!(config.conf_file.as_deref(), Some("/conf/auks.conf"));
         assert_eq!(config.sync.as_deref(), Some("wait"));
         assert_eq!(config.minimum_uid, Some(1000));
-        assert_eq!(unknown, ["hostcredcache=/tmp/cc", "bogus"]);
+        assert_eq!(config.hostcredcache.as_deref(), Some("/tmp/cc"));
+        assert_eq!(unknown, ["bogus"]);
     }
 }

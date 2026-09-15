@@ -7,6 +7,8 @@ members = [
     "auks-krb5",
     "auks-spank-sys",
     "auks-spank",
+    "auks-config",
+    "auks-client",
 ]
 
 [workspace.package]

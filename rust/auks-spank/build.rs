@@ -6,6 +6,12 @@ use std::path::PathBuf;
 
 fn main() {
     println!("cargo:rerun-if-env-changed=SLURM_PREFIX");
+    println!("cargo:rerun-if-env-changed=AUKS_BINDIR");
+    println!("cargo:rerun-if-env-changed=AUKS_SYSCONFDIR");
+    let bindir = env::var("AUKS_BINDIR").unwrap_or_else(|_| "/usr/local/bin".to_owned());
+    println!("cargo:rustc-env=AUKS_BINDIR={bindir}");
+    let sysconfdir = env::var("AUKS_SYSCONFDIR").unwrap_or_else(|_| "/etc".to_owned());
+    println!("cargo:rustc-env=AUKS_SYSCONFDIR={sysconfdir}");
     let prefix = env::var("SLURM_PREFIX").unwrap_or_else(|_| "/usr".to_owned());
     let header = PathBuf::from(&prefix).join("include/slurm/slurm_version.h");
     let text = fs::read_to_string(&header).unwrap_or_else(|error| {
