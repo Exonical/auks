@@ -2,7 +2,6 @@
 //!
 //! Authenticated streams, renewal, address deletion, and cross-realm buffer
 //! operations remain Phase 2/3 work.
-#![allow(missing_docs)]
 
 use std::ffi::{CStr, CString, NulError};
 use std::ptr;
@@ -15,7 +14,7 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 #[error("{op} failed ({code}): {message}")]
 pub struct Error {
-    /// MIT Kerberos error code.
+    /// MIT Kerberos error code, or `-1` for a non-Kerberos input error.
     pub code: i32,
     /// Human-readable MIT Kerberos error text.
     pub message: String,
@@ -31,8 +30,14 @@ impl Error {
             op,
         }
     }
+
+    /// Returns whether this error originated in MIT Kerberos.
+    pub fn is_krb5(&self) -> bool {
+        self.code != -1
+    }
 }
 
+/// The result type returned by this crate.
 pub type Result<T> = std::result::Result<T, Error>;
 
 fn c_string(value: &str, op: &'static str) -> Result<CString> {
@@ -354,9 +359,13 @@ impl Drop for Ccache<'_> {
 /// Ticket lifetime fields.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TicketTimes {
+    /// Time at which the ticket was authenticated.
     pub authtime: i64,
+    /// Ticket start time.
     pub start: i64,
+    /// Ticket expiration time.
     pub end: i64,
+    /// Latest time at which the ticket may be renewed.
     pub renew_till: i64,
 }
 
@@ -563,6 +572,7 @@ fn error_for(context: &Context, code: sys::krb5_error_code, op: &'static str) ->
     check(context.raw(), code, op).expect_err("nonzero Kerberos code must produce an error")
 }
 
+/// Converts a principal to its local operating-system account name.
 pub fn aname_to_localname(context: &Context, principal: &Principal<'_>) -> Result<String> {
     let mut output = vec![0_i8; 256];
     unsafe {
@@ -586,14 +596,63 @@ pub fn aname_to_localname(context: &Context, principal: &Principal<'_>) -> Resul
 pub mod cred_blob {
     use super::*;
 
+    struct TgtCreds<'c> {
+        context: &'c Context,
+        ptr: *mut *mut sys::krb5_creds,
+    }
+
+    impl<'c> TgtCreds<'c> {
+        fn new(context: &'c Context, ptr: *mut *mut sys::krb5_creds) -> Self {
+            Self { context, ptr }
+        }
+    }
+
+    impl Drop for TgtCreds<'_> {
+        fn drop(&mut self) {
+            if !self.ptr.is_null() {
+                unsafe {
+                    sys::krb5_free_tgt_creds(self.context.raw(), self.ptr);
+                }
+            }
+        }
+    }
+
+    struct DataContents<'c> {
+        context: &'c Context,
+        data: sys::krb5_data,
+    }
+
+    impl<'c> DataContents<'c> {
+        fn new(context: &'c Context) -> Self {
+            Self {
+                context,
+                data: sys::krb5_data::default(),
+            }
+        }
+    }
+
+    impl Drop for DataContents<'_> {
+        fn drop(&mut self) {
+            unsafe {
+                sys::krb5_free_data_contents(self.context.raw(), &mut self.data);
+            }
+        }
+    }
+
     /// Credential metadata extracted from a KRB-CRED blob.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct BlobInfo {
+        /// Unparsed client principal.
         pub principal: String,
+        /// Earliest credential start time.
         pub start: i64,
+        /// Earliest credential end time.
         pub end: i64,
+        /// Latest renewal deadline.
         pub renew_till: i64,
+        /// Whether the first credential has no network addresses.
         pub addressless: bool,
+        /// Whether the blob contains more than one credential.
         pub crossrealm: bool,
     }
 
@@ -659,7 +718,7 @@ pub mod cred_blob {
         let principal = cache.principal()?;
         let mut auth = context.auth_context()?;
         auth.set_flags(sys::KRB5_AUTH_CONTEXT_RET_TIME)?;
-        let mut forwarded = sys::krb5_data::default();
+        let mut forwarded = DataContents::new(context);
         unsafe {
             check(
                 context.raw(),
@@ -671,7 +730,7 @@ pub mod cred_blob {
                     ptr::null_mut(),
                     cache.raw,
                     sys::AP_OPTS_MUTUAL_REQUIRED as i32,
-                    &mut forwarded,
+                    &mut forwarded.data,
                 ),
                 "krb5_fwd_tgt_creds",
             )?;
@@ -685,17 +744,15 @@ pub mod cred_blob {
                 sys::krb5_rd_cred(
                     context.raw(),
                     auth.raw,
-                    &mut forwarded,
+                    &mut forwarded.data,
                     &mut output_creds,
                     &mut replay,
                 ),
                 "krb5_rd_cred",
             )?;
-            sys::krb5_free_data_contents(context.raw(), &mut forwarded);
         }
-        let result = serialize_one(context, &mut auth, output_creds)?;
-        unsafe { sys::krb5_free_tgt_creds(context.raw(), output_creds) };
-        Ok(result)
+        let output_creds = TgtCreds::new(context, output_creds);
+        serialize_one(context, &mut auth, &output_creds)
     }
 
     /// Stores every credential in a KRB-CRED blob into a cache.
@@ -721,15 +778,16 @@ pub mod cred_blob {
                 ),
                 "krb5_rd_cred",
             )?;
-            if credentials.is_null() || (*credentials).is_null() {
+            let credentials = TgtCreds::new(context, credentials);
+            if credentials.ptr.is_null() || (*credentials.ptr).is_null() {
                 return Err(Error::input("krb5_rd_cred", "credential list is empty"));
             }
             check(
                 context.raw(),
-                sys::krb5_cc_initialize(context.raw(), cache.raw, (**credentials).client),
+                sys::krb5_cc_initialize(context.raw(), cache.raw, (**credentials.ptr).client),
                 "krb5_cc_initialize",
             )?;
-            let mut item = credentials;
+            let mut item = credentials.ptr;
             while !(*item).is_null() {
                 check(
                     context.raw(),
@@ -738,7 +796,6 @@ pub mod cred_blob {
                 )?;
                 item = item.add(1);
             }
-            sys::krb5_free_tgt_creds(context.raw(), credentials);
         }
         Ok(())
     }
@@ -766,10 +823,11 @@ pub mod cred_blob {
                 ),
                 "krb5_rd_cred",
             )?;
-            if credentials.is_null() || (*credentials).is_null() {
+            let credentials = TgtCreds::new(context, credentials);
+            if credentials.ptr.is_null() || (*credentials.ptr).is_null() {
                 return Err(Error::input("krb5_rd_cred", "credential list is empty"));
             }
-            let first = &**credentials;
+            let first = &**credentials.ptr;
             let principal = Principal {
                 context,
                 raw: {
@@ -787,7 +845,7 @@ pub mod cred_blob {
             let mut end = i64::from(first.times.endtime);
             let mut renew_till = i64::from(first.times.renew_till);
             let mut count = 0;
-            let mut item = credentials;
+            let mut item = credentials.ptr;
             while !(*item).is_null() {
                 let value = &**item;
                 start = start.min(i64::from(value.times.starttime));
@@ -804,7 +862,6 @@ pub mod cred_blob {
                 addressless: first.addresses.is_null(),
                 crossrealm: count > 1,
             };
-            sys::krb5_free_tgt_creds(context.raw(), credentials);
             Ok(result)
         }
     }
@@ -812,9 +869,9 @@ pub mod cred_blob {
     fn serialize_one(
         context: &Context,
         auth: &mut AuthContext<'_>,
-        credentials: *mut *mut sys::krb5_creds,
+        credentials: &TgtCreds<'_>,
     ) -> Result<Vec<u8>> {
-        if credentials.is_null() || unsafe { (*credentials).is_null() } {
+        if credentials.ptr.is_null() || unsafe { (*credentials.ptr).is_null() } {
             return Err(Error::input("krb5_mk_1cred", "credential list is empty"));
         }
         auth.set_flags(0)?;
@@ -826,7 +883,7 @@ pub mod cred_blob {
                 sys::krb5_mk_1cred(
                     context.raw(),
                     auth.raw,
-                    *credentials,
+                    *credentials.ptr,
                     &mut output,
                     &mut replay,
                 ),
