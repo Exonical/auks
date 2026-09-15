@@ -115,10 +115,11 @@ Unchanged from the C-side design, now enforced by the language:
 * `slurm_spank_task_exit` (last task) and `slurm_spank_exit`: stop renewer,
   destroy ccache; `exit` is the authoritative teardown.
 
-This depends on the Audit D check that `user_init`'s child shares memory
-with the parent (`clone(CLONE_VM)`); if a target Slurm uses plain `fork`,
-`StepCtx` is written to a small state file under `/run/auks/<jobid>.<step>`
-instead. Settle in Phase 0.
+Settled (AUDIT A3): every Slurm from 20.11 to 24.11 runs `user_init`
+either in-process or in a `clone(CLONE_VM)` child, so in-memory `StepCtx`
+is safe; no state file needed. Under `contain_spank` the renewer is not
+our child, so D5 must not rely on `waitpid` for shutdown confirmation
+(pidfd / `kill(pid, 0)` polling instead).
 
 ### D5. Renewer as a supervised child
 
@@ -195,8 +196,8 @@ follow-up.
 * Fix A5 (`%u` argument), A4 (`umask(077)`), guard `kill()` in `task_exit`.
 * Compose: Slurm node + `auks.so required` + bats: `srun --auks=yes klist`
   shows the principal; `--auks=no` fails; ccache destroyed at step end.
-* Settle Audit D items (CLONE_VM, `job_container/tmpfs`, KEYRING ownership)
-  and record answers in `AUDIT.md`. Decide D4's ctx-in-memory vs state-file.
+* Settle remaining Audit D items (`job_container/tmpfs`, KEYRING
+  ownership, fd leak) and record answers in `AUDIT.md`. CLONE_VM: done.
 * Capture golden wire vectors from the C client/daemon (`tcpdump` of the
   post-`rd_priv` plaintext via a debug hook, or unit-level `auks_buffer`
   dumps) for `auks-proto` tests.
@@ -292,8 +293,8 @@ per-step RPC to `slurmctld` on hot paths, works for `sbatch` jobs whose
 
 1. ~~Toolchain floor~~ — decided: rustup-managed stable, no distro
    constraint (D7).
-2. Target Slurm version(s) — determines the CLONE_VM answer (D4) and which
-   `spank_*` helpers exist.
+2. Target Slurm version(s) — determines which `spank_*` helpers exist and
+   whether `contain_spank` is in play (D5).
 3. Is `job_container/tmpfs` in use? Raises the priority of D4's
    `user_init` move.
 4. Default ccache type on compute nodes (FILE in `/tmp`, KEYRING, KCM,

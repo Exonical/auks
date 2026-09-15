@@ -79,14 +79,20 @@ Consequences:
   `FD_CLOEXEC` on most of its fds, so the practical leak is limited to what
   it misses **[hypothesis]** — verify with `ls -l /proc/<renewer>/fd`.
 * `renewer_pid` is a plain global (l.149) written in `user_init` and read
-  in `task_exit`. Slurm runs `spank_user_init` in a child of `slurmstepd`;
-  if that child is a plain `fork()` the parent's copy stays 0 and
-  `task_exit` never kills the renewer (l.259 guards `0`/`-1`, so nothing
-  worse happens); if it is `clone(CLONE_VM)` — what recent Slurm uses
-  **[hypothesis]**, confirm against the deployed release's
-  `src/slurmd/slurmstepd/mgr.c` — the write is visible and cleanup works.
-  Correctness therefore depends on an undocumented Slurm implementation
-  detail.
+  in `task_exit`. **Settled** against `src/slurmd/slurmstepd/mgr.c`:
+  in 20.11.9 (l.1772) and 23.02.7 (l.1887) `spank_user()` is called
+  directly in the `slurmstepd` process after `drop_privileges` — no child
+  at all, so the global is simply shared. From 24.11 (`_run_spank_func`,
+  l.1012-1110) it is still in-process by default; only with
+  `SlurmdParameters=contain_spank` is it run in a `clone(CLONE_VM|SIGCHLD)`
+  child (`_spank_user_child`), which shares memory, so the write is
+  visible either way. Two consequences remain: (a) under `contain_spank`
+  the renewer's parent is the short-lived clone child, so `slurmstepd`'s
+  `waitpid(renewer_pid)` (l.288) fails with `ECHILD` after `kill()` — the
+  kill still lands but the renewer is never reaped by us; (b) the plugin
+  still relies on an implementation detail that Slurm's comment in
+  `_run_spank_func` explicitly calls out as a constraint they chose to
+  honour, not a documented guarantee.
 * Renewer is killed only when `exited_tasks == local_task_count` in
   `slurm_spank_task_exit` (l.263). If the step is torn down without a
   `task_exit` per task (node drain, `slurmstepd` crash, OOM-kill of
@@ -259,7 +265,7 @@ is silently dropped if not executable rather than rejected at config time.
 
 | Item | How |
 |---|---|
-| A3 `CLONE_VM` vs `fork` for `spank_user_init` | read `mgr.c` of the target Slurm release; or log `getpid()`/`renewer_pid` from both hooks |
+| ~~A3 `CLONE_VM` vs `fork` for `spank_user_init`~~ | done — in-process (20.11, 23.02, 24.11 default) or `CLONE_VM` (24.11 `contain_spank`); see A3 |
 | A2 namespaces with `job_container/tmpfs` | compose test with a `job_container.conf`; compare ccache path visibility from a task |
 | A2 KEYRING ownership | `keyctl show` from a task on a `KEYRING:`-default host |
 | A3 fd leak | `ls -l /proc/<renewer>/fd` during a step |
