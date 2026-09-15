@@ -20,13 +20,6 @@ kinit -k -t /etc/krb5.keytab -c FILE:/tmp/krb5cc_0 "$HOST_PRINCIPAL"
 
 if [ "${AUKS_SPANK_IMPL:-c}" = rust ]
 then
-    sed -i \
-        -e '/^api[[:space:]]*{/,/^}/ s/^\([[:space:]]*LogFile[[:space:]]*=.\{0,\}\)$/ LogFile            =   "" ;/' \
-        -e '/^api[[:space:]]*{/,/^}/ s/^\([[:space:]]*DebugFile[[:space:]]*=.\{0,\}\)$/ DebugFile          =   "" ;/' \
-        -e '/^renewer[[:space:]]*{/,/^}/ s/^\([[:space:]]*LogFile[[:space:]]*=.\{0,\}\)$/ LogFile            =   "" ;/' \
-        -e '/^renewer[[:space:]]*{/,/^}/ s/^\([[:space:]]*DebugFile[[:space:]]*=.\{0,\}\)$/ DebugFile          =   "" ;/' \
-        -e '/^renewer[[:space:]]*{/,/^}/ s/LogLevel[[:space:]]*=.*/LogLevel         =   0 ;/' \
-        /conf/auks.conf
     export AUKS_CONF=/conf/auks.conf
     printf '%s\n' \
         'required /usr/local/lib/slurm/auks_rs.so conf=/conf/auks.conf hostcredcache=/tmp/krb5cc_0 default=enabled' \

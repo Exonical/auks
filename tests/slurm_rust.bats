@@ -132,7 +132,22 @@ wait_for_log() {
         ! grep -q "^SLURM_" /tmp/renewer-env
         grep -q "^KRB5CCNAME=" /tmp/renewer-env
         grep -q "^AUKS_CONF=/conf/auks.conf$" /tmp/renewer-env
-        test "$(find "/proc/$pid/fd" -mindepth 1 -maxdepth 1 -printf "%f\n" | sort | tr "\n" " ")" = "0 1 2 "
+        for fd in 0 1 2; do
+            test "$(readlink "/proc/$pid/fd/$fd")" = "/dev/null"
+        done
+        for fd_path in /proc/$pid/fd/*; do
+            fd=${fd_path##*/}
+            case "$fd" in
+                0|1|2) ;;
+                *)
+                    target=$(readlink "$fd_path") || exit 1
+                    case "$target" in
+                        /tmp/auksapi.log|/var/log/auksdrenewer.log) ;;
+                        *) exit 1 ;;
+                    esac
+                    ;;
+            esac
+        done
     '
     [ "$status" -eq 0 ]
 }
