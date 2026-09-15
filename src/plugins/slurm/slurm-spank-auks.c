@@ -76,6 +76,7 @@
 #endif
 
 #include <fcntl.h>
+#include <limits.h>
 #include <paths.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -97,6 +98,7 @@
 #include "auks/auks_error.h"
 #include "auks/auks_api.h"
 #include "auks/auks_krb5_cred.h"
+#include "xternal/xlogger.h"
 
 #define AUKS_HEADER "spank-auks: "
 
@@ -224,6 +226,9 @@ slurm_spank_init_post_opt (spank_t sp, int ac, char *av[])
 int
 slurm_spank_local_user_init (spank_t sp, int ac, char **av)
 {
+	(void)sp;
+	(void)ac;
+	(void)av;
 	return 0;
 }
 
@@ -231,6 +236,9 @@ int
 slurm_spank_task_exit (spank_t sp, int ac, char **av)
 {
 	uint32_t local_task_count;
+
+	(void)ac;
+	(void)av;
 
 	uid_t uid;
 	gid_t gid;
@@ -286,6 +294,7 @@ slurm_spank_task_exit (spank_t sp, int ac, char **av)
 			/* kill the renewer process and wait for it */
 			kill(renewer_pid, SIGTERM);
 			waitpid(renewer_pid, NULL, 0);
+			renewer_pid = 0;
 
 			/* replace privileged uid/gid */
 			_seteuid(getuid());
@@ -330,13 +339,13 @@ slurm_spank_user_init (spank_t sp, int ac, char **av)
 		   Renewer process doesn't need to go back to the original uid
 		*/
 		if ( setresgid(getegid(), getegid(), getegid()) ){
-			xerror("Error while dropping privileges for credential renewer: ",
+			xerror("Error while dropping privileges for credential renewer: %s",
 			       strerror(errno));
 			exit(1);
 		}
 
 		if ( setresuid(geteuid(), geteuid(), geteuid()) ){
-			xerror("Error while dropping privileges for credential renewer: ",
+			xerror("Error while dropping privileges for credential renewer: %s",
 			       strerror(errno));
 			exit(1);
 		}
@@ -355,13 +364,16 @@ slurm_spank_user_init (spank_t sp, int ac, char **av)
 		argv[3]=NULL;
 		if (auks_credcache != NULL)
 			setenv("KRB5CCNAME",auks_credcache,1);
-		chdir("/");
+		if (chdir("/") != 0) {
+			xerror("unable to change directory to /: %s", strerror(errno));
+			exit(1);
+		}
 		execv(argv[0],argv);
 		xerror("unable to exec credential renewer (%s)",argv[0]);
 		exit(0);
 	}
 	else {
-		xinfo("credential renewer launched (pid=%u)",renewer_pid);
+		xinfo("credential renewer launched (pid=%ld)",(long)renewer_pid);
 	}
 
 	return 0;
@@ -585,7 +597,7 @@ spank_auks_remote_init (spank_t sp, int ac, char *av[])
 			xerror("unable to build auks file credcache name");
 			goto out_cred;
 		}
-		omask = umask(S_IRUSR | S_IWUSR);
+		omask = umask(S_IRWXG | S_IRWXO);
 		fstatus = mkstemp(auks_file_credcache);
 		umask(omask);
 		if ( fstatus == -1) {
@@ -664,6 +676,9 @@ int
 spank_auks_remote_exit (spank_t sp, int ac, char **av)
 {
 	int fstatus;
+
+	(void)ac;
+	(void)av;
 
 	uid_t uid;
 	gid_t gid;
@@ -753,6 +768,9 @@ _spank_auks_get_current_mode(spank_t sp, int ac, char *av[])
 {
 	char spank_auks_env[5];
 
+	(void)ac;
+	(void)av;
+
 	char* envval=NULL;
 	uid_t uid;
 
@@ -773,7 +791,7 @@ _spank_auks_get_current_mode(spank_t sp, int ac, char *av[])
 		}
 
 		if ( uid < auks_minimum_uid ) {
-			xinfo("user '%u' not allowed to do auks stuff by conf");
+			xinfo("user '%u' not allowed to do auks stuff by conf",uid);
 			return AUKS_MODE_DISABLED;
 		}
 	}
@@ -814,16 +832,19 @@ _spank_auks_get_current_mode(spank_t sp, int ac, char *av[])
 static int
 _auks_opt_process (int val, const char *optarg, int remote)
 {
+	(void)val;
+	(void)remote;
+
         if ( optarg == NULL )
 	        return (1);
 
 	if (strncmp ("no", optarg, 2) == 0) {
 	        auks_mode = AUKS_MODE_DISABLED ;
-		xdebug("disabled on user request",optarg);
+		xdebug("disabled on user request: %s",optarg);
 	}
 	else if (strncmp ("yes", optarg, 3) == 0) {
 	        auks_mode = AUKS_MODE_ENABLED ;
-		xdebug("enabled on user request",optarg);
+		xdebug("enabled on user request: %s",optarg);
 	}
 	else if (strncmp ("done", optarg, 4) != 0) {
 		xerror ("bad parameter %s", optarg);
@@ -832,7 +853,7 @@ _auks_opt_process (int val, const char *optarg, int remote)
 	else {
 	        auks_mode = AUKS_MODE_DONE ;
 		setenv("SLURM_SPANK_AUKS","done",0);
-		xdebug("enabled on user request (in done mode)",optarg);
+		xdebug("enabled on user request (in done mode): %s",optarg);
 	}
 
 	return (0);
@@ -844,6 +865,8 @@ _parse_plugstack_conf (spank_t sp, int ac, char *av[])
 {
 	int i;
 	char* elt;
+
+	(void)sp;
 
 	for (i = 0; i < ac; i++) {
 		elt = av[i];
@@ -872,11 +895,14 @@ _parse_plugstack_conf (spank_t sp, int ac, char *av[])
 		        auks_cc_switch = 0;
 		}
 		else if (strncmp ("minimum_uid=", av[i], 12) == 0) {
-		        auks_minimum_uid = (uid_t) strtol(av[i]+12,NULL,10);
-			if ( auks_minimum_uid == LONG_MIN ||
-			     auks_minimum_uid == LONG_MAX ) {
-				xerror ("ignoring bad value %s for parameter ",
+			long minimum_uid = strtol(av[i]+12, NULL, 10);
+			if ( minimum_uid == LONG_MIN ||
+			     minimum_uid == LONG_MAX ) {
+				xerror ("ignoring bad value %s for parameter %s",
 					"minimum_uid",av[i]+12);
+			}
+			else {
+				auks_minimum_uid = (uid_t) minimum_uid;
 			}
 		}
 		else if ( strncmp(elt,"hostcredcache=",14) == 0 ) {

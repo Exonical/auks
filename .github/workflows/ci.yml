@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-slurm-plugin:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            autoconf \
+            automake \
+            libtool \
+            pkg-config \
+            libkrb5-dev \
+            libtirpc-dev \
+            flex \
+            bison \
+            libslurm-dev
+
+      - name: Build
+        run: |
+          autoreconf -i
+          ./configure --with-slurm
+          make
+          make -C src/plugins/slurm clean
+          make -C src/plugins/slurm \
+            CFLAGS="-Wall -Wextra -Wformat=2 -Werror"
+
+  compose-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build test image
+        run: docker compose build
+
+      - name: Start test services
+        run: docker compose up -d
+
+      - name: Run integration tests
+        run: docker compose exec -T auks_client bats /tests/simple.bats
+
+      - name: Stop test services
+        if: always()
+        run: docker compose down -v
