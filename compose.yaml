@@ -40,3 +40,24 @@ services:
         condition: service_healthy
       auks_server:
         condition: service_healthy
+  slurm:
+    build: .
+    image: quay.io/cea-hpc/auks
+    hostname: slurm
+    domainname: example.com
+    command: bash -xe /usr/local/bin/entrypoint_slurm.sh
+    volumes:
+      - type: bind
+        source: ./tests/
+        target: /tests/
+    healthcheck:
+      test: ["CMD", "scontrol", "ping"]
+      interval: 10s
+      timeout: 30s
+      retries: 10
+      start_period: 20s
+    depends_on:
+      kdc:
+        condition: service_healthy
+      auks_server:
+        condition: service_healthy

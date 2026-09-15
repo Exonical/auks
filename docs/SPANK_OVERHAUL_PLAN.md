@@ -191,11 +191,14 @@ follow-up.
 
 ### Phase 0 — safety net (C, no behaviour change)
 
-* CI: build `auks.so` with `--with-slurm` against a pinned Slurm; plugin
-  compiled with `-Wall -Wextra -Wformat=2 -Werror` (catches A5).
-* Fix A5 (`%u` argument), A4 (`umask(077)`), guard `kill()` in `task_exit`.
-* Compose: Slurm node + `auks.so required` + bats: `srun --auks=yes klist`
-  shows the principal; `--auks=no` fails; ccache destroyed at step end.
+* ~~CI: build `auks.so` with `--with-slurm` against a pinned Slurm; plugin
+  compiled with `-Wall -Wextra -Wformat=2 -Werror` (catches A5).~~ done (PR #2).
+* ~~Fix A5 (`%u` argument), A4 (`umask(077)`), guard `kill()` in `task_exit`.~~ done (PR #2).
+* ~~Compose: Slurm node + `auks.so required` + bats~~ done: Rocky Linux 10
+  image, Slurm 26.05.4 built from source (`auth/slurm`, `CgroupPlugin=disabled`),
+  `tests/slurm.bats` covers `srun`/`sbatch --auks=yes`, env-var disable,
+  ccache destruction, renewer lifecycle — and pins the A11 defect
+  (`--auks=no` alone is not honoured on the node) until D3/Phase 2 fixes it.
 * Settle remaining Audit D items (`job_container/tmpfs`, KEYRING
   ownership, fd leak) and record answers in `AUDIT.md`. CLONE_VM: done.
 * Capture golden wire vectors from the C client/daemon (`tcpdump` of the
@@ -222,8 +225,9 @@ follow-up.
   `AUKS_KRB5CCNAME` via `spank_setenv`/`spank_job_control_setenv` instead of
   mutating `slurmstepd`'s env (documented change for downstream plugins).
 * `enforced` → `strict` (alias kept), applies to both client add failure
-  and remote GET failure. `SLURM_SPANK_AUKS` set with overwrite; remote
-  `--auks=` wins over env.
+  and remote GET failure. `SLURM_SPANK_AUKS` set with overwrite from the
+  option callback for every value (fixes A11); remote `--auks=` wins over
+  env. Flip the A11 assertion in `tests/slurm.bats`.
 * Renewer still the **C** `auks -R loop` at this stage (spawned by the Rust
   plugin) — this keeps the phase to one component.
 * Gate: Slurm bats suite green with Rust plugin against the C daemon;

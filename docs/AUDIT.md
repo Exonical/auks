@@ -177,6 +177,25 @@ commented out. The plugin has never been built against Slurm in CI (`--with-
 slurm` is not passed in `.travis.yml`/Dockerfile). Behavioural regressions in
 the plugin are invisible until a cluster upgrade.
 
+*Update:* `tests/slurm.bats` now runs `srun`/`sbatch --auks` against a
+single-node Slurm 26.05 in the compose rig (Rocky Linux 10), and CI builds
+`auks.so` with `-Werror`.
+
+### A11. `--auks=no|yes` is not propagated to the node — **Medium (user expectation)**
+
+`_auks_opt_process` (l.833-858) only writes `auks_mode`, a static in the
+`srun` process; it exports `SLURM_SPANK_AUKS` solely for `done`. On the
+remote side `spank_auks_get_mode` (l.799-827) reads the job env var, else the
+plugstack `default=`. Consequence, confirmed by
+`tests/slurm.bats` ("srun --auks=no alone is not honoured"): with
+`default=enabled`, `srun --auks=no` skips the local forward to `auksd` but
+`slurmstepd` still fetches whatever credential is already stored for the uid
+and installs a ccache + renewer in the step. Only `SLURM_SPANK_AUKS=no` in
+the job environment actually disables it. The inverse holds with
+`default=disabled`: `--auks=yes` forwards the credential but the step never
+retrieves it. Fix: export `SLURM_SPANK_AUKS=<value>` from the option
+callback in the local context (D3 in the plan).
+
 ---
 
 ## B. Library / daemon findings relevant to the plugin
@@ -269,4 +288,5 @@ is silently dropped if not executable rather than rejected at config time.
 | A2 namespaces with `job_container/tmpfs` | compose test with a `job_container.conf`; compare ccache path visibility from a task |
 | A2 KEYRING ownership | `keyctl show` from a task on a `KEYRING:`-default host |
 | A3 fd leak | `ls -l /proc/<renewer>/fd` during a step |
+| A11 `--auks=no` propagation | done — `tests/slurm.bats` |
 | A4 libkrb5 recreate behaviour | `strace -f` the store under `force_file_ccache` |

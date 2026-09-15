@@ -35,6 +35,12 @@
 #         role = admin ;
 # }
 #-------------------------------------------------------------------------------
+# The Slurm node retrieves credentials for job users.
+rule {
+    principal = ^host/slurm\.example\.com@EXAMPLE\.COM$ ;
+    host = *;
+    role = admin;
+}
 rule {
     principal = ^host/.*@EXAMPLE.COM;
     host = *;
