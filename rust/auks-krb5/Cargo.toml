@@ -1,0 +1,15 @@
+[package]
+name = "auks-krb5"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+auks-krb5-sys = { path = "../auks-krb5-sys" }
+thiserror = "2"
+
+[features]
+kdc = []
+
+[lints]
+workspace = true
