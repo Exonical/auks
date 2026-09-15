@@ -1,0 +1,11 @@
+[package]
+name = "auks-proto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror = "2"
+
+[lints]
+workspace = true
