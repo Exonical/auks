@@ -137,15 +137,18 @@ Any failure in enabled mode returns `ESPANK_ERROR` with a
 
 ### D7. Toolchain and packaging
 
-* MSRV: **1.75** if the EL8 AppStream compiler is a hard requirement
-  (AlmaLinux 8.10 ships 1.75.0; EL9 ships 1.79 → 1.88 depending on point
-  release). This rules out crates whose metadata demands 1.85+ (`picky-krb`,
-  `sspi`), none of which we need under D1. Open question Q1.
+* Toolchain (decided): **rustup-managed stable**, pinned per release via
+  `rust-toolchain.toml`; edition 2024; no distro-compiler constraint, so
+  the EL8 1.75 / EL9 1.79–1.88 AppStream compilers are irrelevant and crate
+  MSRVs are not a selection criterion. Bump the pin deliberately, in its
+  own PR, with `cargo +<new> test` green.
 * Build: Cargo workspace under `rust/`; autotools keeps building the C
   components until each is retired, and gains a `--enable-rust` switch that
   runs `cargo build --release --locked` and installs the artefacts to the
-  same paths. RPM: `cargo vendor` tarball as `Source1`, `%cargo_*` macros
-  from `rust-packaging` (EL8: `rust-toolset` module).
+  same paths. RPM: `cargo vendor` tarball as `Source1`; the spec installs
+  the pinned toolchain via rustup in `%build` (or the build container ships
+  it) rather than depending on `rust-toolset`. `Dockerfile`/`compose.yaml`
+  images gain the same rustup step so CI and packaging use one compiler.
 * Binary names and paths are unchanged (`/usr/bin/auks`, `/usr/sbin/auksd`,
   `$libdir/slurm/auks.so`), so `plugstack.conf`, systemd units, `aukspriv`
   and the HOWTO stay valid.
@@ -162,7 +165,7 @@ config parsing.
 
 ```
 rust/
-  Cargo.toml            workspace, MSRV, lints (unsafe_op_in_unsafe_fn, missing_docs on pub)
+  Cargo.toml            workspace, edition 2024, lints (unsafe_op_in_unsafe_fn, missing_docs on pub)
   auks-krb5-sys/        bindgen allowlist over krb5.h            (Phase 1)
   auks-krb5/            safe wrappers (D1)                        (Phase 1)
   auks-proto/           buffer/message codec, request/reply enums (Phase 1)
@@ -276,7 +279,7 @@ per-step RPC to `slurmctld` on hot paths, works for `sbatch` jobs whose
 | GSSAPI | `libgssapi` 0.11 (MIT, maintained, ~1 M dl) · `cross-krb5` 0.5 (adds SSPI) · `sspi` 0.21 (native, MSRV 1.89) | `libgssapi` for protocol v2 only (Phase 5) |
 | SPANK ABI | `slurm-spank` 0.4.1 (Apache-2.0, 2025-11, `SPANK_PLUGIN!` + typed `get_item`) · `slurm-banking-plugins` (bindgen example) | Prototype on `slurm-spank`, fallback own shim (D3) |
 | Pure-Rust Kerberos | `krb5-rs` 0.1.0 (renewal not implemented) · `rskrb5` 0.2.0 (renewal advertised, ~94 dl) · `kerbeiros` (AGPL) · `picky-krb` (ASN.1 only, MSRV 1.85) · `kerbcore` (1.88+) | Not now; revisit for Phase 5+ |
-| Toolchain | EL8: Rust 1.75 · EL9: 1.79–1.88 · RHEL Rust Toolset modules | MSRV 1.75 pending Q1 |
+| Toolchain | EL8: Rust 1.75 · EL9: 1.79–1.88 · RHEL Rust Toolset modules · rustup stable | rustup stable, pinned in `rust-toolchain.toml` (decided) |
 
 ## Non-goals
 
@@ -287,9 +290,8 @@ per-step RPC to `slurmctld` on hot paths, works for `sbatch` jobs whose
 
 ## Open questions for Bryce
 
-1. Toolchain floor: must this build with the distro Rust on AlmaLinux 8
-   (1.75), or can packaging require the Rust Toolset module / a newer EL9
-   compiler? This sets MSRV and edition.
+1. ~~Toolchain floor~~ — decided: rustup-managed stable, no distro
+   constraint (D7).
 2. Target Slurm version(s) — determines the CLONE_VM answer (D4) and which
    `spank_*` helpers exist.
 3. Is `job_container/tmpfs` in use? Raises the priority of D4's
