@@ -162,6 +162,15 @@ impl Context {
 
     /// Creates a unique credential cache, optionally selecting its type.
     pub fn new_unique_ccache<'c>(&'c self, cache_type: Option<&str>) -> Result<Ccache<'c>> {
+        let default_type;
+        let cache_type = match cache_type {
+            Some(value) => Some(value),
+            None => {
+                let default_cache = self.default_ccache()?;
+                default_type = default_cache.type_name().to_owned();
+                Some(default_type.as_str())
+            }
+        };
         let cache_type = cache_type.map(|value| c_string(value, "krb5_cc_new_unique"));
         let cache_type = cache_type.transpose()?;
         let mut raw = ptr::null_mut();

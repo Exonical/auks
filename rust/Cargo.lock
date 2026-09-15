@@ -63,7 +63,12 @@ dependencies = [
 name = "auks-spank"
 version = "0.1.0"
 dependencies = [
+ "auks-client",
+ "auks-config",
+ "auks-cred",
+ "auks-krb5",
  "auks-spank-sys",
+ "libc",
 ]
 
 [[package]]

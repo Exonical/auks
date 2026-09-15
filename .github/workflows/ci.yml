@@ -70,7 +70,7 @@ jobs:
         run: AUKS_SPANK_IMPL=rust docker compose up -d
 
       - name: Run Rust Slurm integration tests
-        run: docker compose exec -T slurm bats /tests/slurm_rust.bats
+        run: docker compose exec -T slurm runuser -u user -- bats /tests/slurm_rust.bats
 
       - name: Stop test services
         if: always()

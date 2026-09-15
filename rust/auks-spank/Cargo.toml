@@ -9,7 +9,12 @@ build = "build.rs"
 crate-type = ["cdylib"]
 
 [dependencies]
+auks-client = { path = "../auks-client" }
+auks-config = { path = "../auks-config" }
+auks-cred = { path = "../auks-cred" }
+auks-krb5 = { path = "../auks-krb5" }
 auks-spank-sys = { path = "../auks-spank-sys" }
+libc = "0.2"
 
 [lints]
 workspace = true

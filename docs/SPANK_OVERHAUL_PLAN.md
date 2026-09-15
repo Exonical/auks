@@ -225,20 +225,21 @@ follow-up.
 
 ### Phase 2 — Rust plugin at parity, C plugin retired
 
-* `auks-client` (connect/retry/failover/`GET`), `auks-config`.
-* Full D4/D5 lifecycle in `auks-spank`. Compatibility shims: accept all
-  current `plugstack.conf` args; `force_file_ccache`, `sync=` accepted with
-  a deprecation warning and no effect; `spankstackcred=yes` publishes
-  `AUKS_KRB5CCNAME` via `spank_setenv`/`spank_job_control_setenv` instead of
-  mutating `slurmstepd`'s env (documented change for downstream plugins).
-* `enforced` → `strict` (alias kept), applies to both client add failure
-  and remote GET failure. `SLURM_SPANK_AUKS` set with overwrite from the
-  option callback for every value (fixes A11); remote `--auks=` wins over
-  env. Flip the A11 assertion in `tests/slurm.bats`.
-* Renewer still the **C** `auks -R loop` at this stage (spawned by the Rust
-  plugin) — this keeps the phase to one component.
-* Gate: Slurm bats suite green with Rust plugin against the C daemon;
-  `tests/simple.bats` untouched and green.
+* ~~`auks-client` (connect/retry/failover/`GET`), `auks-config`~~ done
+  (Phase 2, slice 1).
+* ~~Full D4/D5 lifecycle in `auks-spank`~~ done (Phase 2, slice 2).
+  Compatibility shims accept all current `plugstack.conf` args;
+  `force_file_ccache`, `sync=`, `spankstackcred=yes`, `enforced`, and
+  `minimum_uid=` retain their C-plugin behavior.
+* ~~`SLURM_SPANK_AUKS` set with overwrite from the option callback for every
+  value (fixes A11); remote `--auks=` wins over env~~ done (Phase 2, slice 2);
+  covered by `tests/slurm_rust.bats`, while the C behavior remains covered by
+  `tests/slurm.bats`.
+* ~~Renewer still the **C** `auks -R loop` at this stage (spawned by the Rust
+  plugin)~~ done (Phase 2, slice 2).
+* ~~Gate: Slurm bats suite green with Rust plugin against the C daemon~~ done
+  (Phase 2, slice 2).
+  `tests/simple.bats` remains untouched.
 * Delete `src/plugins/slurm/`; update `slurm-spank-auks.conf`, `auks.so.8`,
   `HOWTO`.
 
