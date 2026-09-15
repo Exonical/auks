@@ -12,6 +12,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "auks-client"
+version = "0.1.0"
+dependencies = [
+ "auks-config",
+ "auks-cred",
+ "auks-krb5",
+ "auks-proto",
+ "thiserror",
+]
+
+[[package]]
+name = "auks-config"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+]
+
+[[package]]
 name = "auks-cred"
 version = "0.1.0"
 dependencies = [

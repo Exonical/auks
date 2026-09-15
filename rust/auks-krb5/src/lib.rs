@@ -4,6 +4,8 @@
 //! operations remain Phase 2/3 work.
 
 use std::ffi::{CStr, CString, NulError};
+use std::net::Ipv4Addr;
+use std::os::fd::RawFd;
 use std::ptr;
 use std::slice;
 
@@ -40,6 +42,9 @@ impl Error {
 /// The result type returned by this crate.
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// Enables sequence numbers on an authentication context.
+pub const AUTH_CONTEXT_DO_SEQUENCE: u32 = sys::KRB5_AUTH_CONTEXT_DO_SEQUENCE;
+
 fn c_string(value: &str, op: &'static str) -> Result<CString> {
     CString::new(value).map_err(|error: NulError| Error::input(op, error.to_string()))
 }
@@ -66,6 +71,28 @@ fn bytes(data: &sys::krb5_data) -> &[u8] {
         &[]
     } else {
         unsafe { slice::from_raw_parts(data.data.cast::<u8>(), data.length as usize) }
+    }
+}
+
+struct DataContents<'c> {
+    context: &'c Context,
+    data: sys::krb5_data,
+}
+
+impl<'c> DataContents<'c> {
+    fn new(context: &'c Context) -> Self {
+        Self {
+            context,
+            data: sys::krb5_data::default(),
+        }
+    }
+}
+
+impl Drop for DataContents<'_> {
+    fn drop(&mut self) {
+        unsafe {
+            sys::krb5_free_data_contents(self.context.raw(), &mut self.data);
+        }
     }
 }
 
@@ -556,6 +583,147 @@ impl<'c> AuthContext<'c> {
             )
         }
     }
+
+    /// Sets IPv4 addresses used by the authentication context.
+    pub fn set_addrs(&mut self, local: Ipv4Addr, remote: Ipv4Addr) -> Result<()> {
+        let local_contents = local.octets();
+        let remote_contents = remote.octets();
+        let mut local_addr = sys::krb5_address {
+            addrtype: sys::ADDRTYPE_INET as i32,
+            length: local_contents.len() as u32,
+            contents: local_contents.as_ptr() as *mut u8,
+            ..sys::krb5_address::default()
+        };
+        let mut remote_addr = sys::krb5_address {
+            addrtype: sys::ADDRTYPE_INET as i32,
+            length: remote_contents.len() as u32,
+            contents: remote_contents.as_ptr() as *mut u8,
+            ..sys::krb5_address::default()
+        };
+        unsafe {
+            check(
+                self.context.raw(),
+                sys::krb5_auth_con_setaddrs(
+                    self.context.raw(),
+                    self.raw,
+                    &mut local_addr,
+                    &mut remote_addr,
+                ),
+                "krb5_auth_con_setaddrs",
+            )
+        }
+    }
+
+    /// Sets the dummy IPv4 addresses used for NAT traversal.
+    pub fn set_dummy_addrs(&mut self) -> Result<()> {
+        let contents = *b"dummy";
+        let mut local_addr = sys::krb5_address {
+            addrtype: libc_af_inet(),
+            length: contents.len() as u32,
+            contents: contents.as_ptr() as *mut u8,
+            ..sys::krb5_address::default()
+        };
+        let mut remote_addr = sys::krb5_address {
+            addrtype: libc_af_inet(),
+            length: contents.len() as u32,
+            contents: contents.as_ptr() as *mut u8,
+            ..sys::krb5_address::default()
+        };
+        unsafe {
+            check(
+                self.context.raw(),
+                sys::krb5_auth_con_setaddrs(
+                    self.context.raw(),
+                    self.raw,
+                    &mut local_addr,
+                    &mut remote_addr,
+                ),
+                "krb5_auth_con_setaddrs",
+            )
+        }
+    }
+
+    /// Performs mutual Kerberos authentication over a file descriptor.
+    pub fn sendauth(
+        &mut self,
+        fd: &mut RawFd,
+        client: &Principal<'_>,
+        server: &Principal<'_>,
+        ccache: &Ccache<'_>,
+    ) -> Result<()> {
+        let version = CString::new("0.1").expect("literal has no NUL");
+        unsafe {
+            check(
+                self.context.raw(),
+                sys::krb5_sendauth(
+                    self.context.raw(),
+                    &mut self.raw,
+                    fd as *mut RawFd as sys::krb5_pointer,
+                    version.as_ptr() as *mut _,
+                    client.raw,
+                    server.raw,
+                    (sys::AP_OPTS_MUTUAL_REQUIRED | sys::AP_OPTS_USE_SUBKEY) as i32,
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    ccache.raw,
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                ),
+                "krb5_sendauth",
+            )
+        }
+    }
+
+    /// Wraps plaintext in a Kerberos privacy message.
+    pub fn mk_priv(&self, plaintext: &[u8]) -> Result<Vec<u8>> {
+        let input = sys::krb5_data {
+            length: plaintext.len() as u32,
+            data: plaintext.as_ptr() as *mut _,
+            ..sys::krb5_data::default()
+        };
+        let mut output = DataContents::new(self.context);
+        let mut replay = sys::krb5_replay_data::default();
+        unsafe {
+            check(
+                self.context.raw(),
+                sys::krb5_mk_priv(
+                    self.context.raw(),
+                    self.raw,
+                    &input,
+                    &mut output.data,
+                    &mut replay,
+                ),
+                "krb5_mk_priv",
+            )?;
+            Ok(bytes(&output.data).to_vec())
+        }
+    }
+
+    /// Unwraps a Kerberos privacy message.
+    pub fn rd_priv(&self, cipher: &[u8]) -> Result<Vec<u8>> {
+        let input = sys::krb5_data {
+            length: cipher.len() as u32,
+            data: cipher.as_ptr() as *mut _,
+            ..sys::krb5_data::default()
+        };
+        let mut output = DataContents::new(self.context);
+        let mut replay = sys::krb5_replay_data::default();
+        unsafe {
+            check(
+                self.context.raw(),
+                sys::krb5_rd_priv(
+                    self.context.raw(),
+                    self.raw,
+                    &input,
+                    &mut output.data,
+                    &mut replay,
+                ),
+                "krb5_rd_priv",
+            )?;
+            Ok(bytes(&output.data).to_vec())
+        }
+    }
 }
 
 impl Drop for AuthContext<'_> {
@@ -570,6 +738,47 @@ impl Drop for AuthContext<'_> {
 
 fn error_for(context: &Context, code: sys::krb5_error_code, op: &'static str) -> Error {
     check(context.raw(), code, op).expect_err("nonzero Kerberos code must produce an error")
+}
+
+fn libc_af_inet() -> i32 {
+    2
+}
+
+/// Writes a Kerberos-framed message to a file descriptor.
+pub fn write_message(context: &Context, fd: &mut RawFd, data: &[u8]) -> Result<()> {
+    let mut message = sys::krb5_data {
+        length: data.len() as u32,
+        data: data.as_ptr() as *mut _,
+        ..sys::krb5_data::default()
+    };
+    unsafe {
+        check(
+            context.raw(),
+            sys::krb5_write_message(
+                context.raw(),
+                fd as *mut RawFd as sys::krb5_pointer,
+                &mut message,
+            ),
+            "krb5_write_message",
+        )
+    }
+}
+
+/// Reads a Kerberos-framed message from a file descriptor.
+pub fn read_message(context: &Context, fd: &mut RawFd) -> Result<Vec<u8>> {
+    let mut message = DataContents::new(context);
+    unsafe {
+        check(
+            context.raw(),
+            sys::krb5_read_message(
+                context.raw(),
+                fd as *mut RawFd as sys::krb5_pointer,
+                &mut message.data,
+            ),
+            "krb5_read_message",
+        )?;
+        Ok(bytes(&message.data).to_vec())
+    }
 }
 
 /// Converts a principal to its local operating-system account name.
@@ -613,28 +822,6 @@ pub mod cred_blob {
                 unsafe {
                     sys::krb5_free_tgt_creds(self.context.raw(), self.ptr);
                 }
-            }
-        }
-    }
-
-    struct DataContents<'c> {
-        context: &'c Context,
-        data: sys::krb5_data,
-    }
-
-    impl<'c> DataContents<'c> {
-        fn new(context: &'c Context) -> Self {
-            Self {
-                context,
-                data: sys::krb5_data::default(),
-            }
-        }
-    }
-
-    impl Drop for DataContents<'_> {
-        fn drop(&mut self) {
-            unsafe {
-                sys::krb5_free_data_contents(self.context.raw(), &mut self.data);
             }
         }
     }

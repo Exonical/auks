@@ -54,7 +54,7 @@ RUN ./configure \
 
 FROM rockylinux/rockylinux:10 AS rust-build
 
-RUN dnf -y install curl gcc \
+RUN dnf -y install clang-devel curl gcc krb5-devel \
     && dnf clean all
 
 RUN curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
@@ -64,7 +64,8 @@ WORKDIR /build
 COPY rust/ rust/
 COPY --from=slurm-build /usr/local/include/slurm /usr/local/include/slurm
 WORKDIR /build/rust
-RUN SLURM_PREFIX=/usr/local cargo build --release -p auks-spank --locked
+RUN SLURM_PREFIX=/usr/local cargo build --release --workspace --examples --locked \
+    && SLURM_PREFIX=/usr/local cargo build --release -p auks-spank --locked
 
 FROM rockylinux/rockylinux:10
 
@@ -98,6 +99,7 @@ RUN dnf -y install dnf-plugins-core \
 
 COPY --from=slurm-build /usr/local /usr/local
 COPY --from=rust-build /build/rust/target/release/libauks_spank.so /usr/local/lib/slurm/auks_rs.so
+COPY --from=rust-build /build/rust/target/release/examples/auksctl /usr/local/bin/auksctl-rs
 
 COPY . auks
 

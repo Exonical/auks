@@ -1,0 +1,15 @@
+[package]
+name = "auks-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+auks-config = { path = "../auks-config" }
+auks-cred = { path = "../auks-cred" }
+auks-krb5 = { path = "../auks-krb5" }
+auks-proto = { path = "../auks-proto" }
+thiserror = "2"
+
+[lints]
+workspace = true
