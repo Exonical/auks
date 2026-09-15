@@ -33,6 +33,9 @@ pub enum Error {
     /// No readable Kerberos credential cache was available.
     #[error("no readable Kerberos credential cache: {0}")]
     NoCcache(String),
+    /// The credential could not be transformed for AUKS forwarding.
+    #[error("auks cred can not transformed in an addressless one: {0}")]
+    CredentialTransform(String),
     /// The daemon returned an unexpected reply.
     #[error("unexpected AUKS reply {0:?}")]
     UnexpectedReply(MessageType),
@@ -211,6 +214,22 @@ impl Client {
         .map_err(|error| Error::NoCcache(error.to_string()))?;
         let blob =
             cred_blob::get(&context, &cache).map_err(|error| Error::NoCcache(error.to_string()))?;
+        let info = cred_blob::parse(&context, &blob)?;
+        let mut blob = blob;
+        if !info.addressless {
+            blob = cred_blob::deladdr(&context, &blob)
+                .map_err(|error| Error::CredentialTransform(error.to_string()))?;
+        }
+        if !info.crossrealm
+            && let Some(realm) = self
+                .config
+                .cross_realm
+                .as_deref()
+                .filter(|realm| !realm.is_empty())
+            && let Ok(transformed) = cred_blob::cross_realm(&context, realm, &blob)
+        {
+            blob = transformed;
+        }
         let requester = ccache.map_or_else(|| self.clone(), |name| self.clone().with_ccache(name));
         let reply = requester.request(&messages::add_request(&blob))?;
         self.expect_empty_reply(reply, MessageType::AddReply)

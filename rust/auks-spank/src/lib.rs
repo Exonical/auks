@@ -6,6 +6,7 @@ use std::ffi::{CStr, CString, c_char, c_int, c_uint};
 use std::io;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Mutex;
+use std::time::Duration;
 
 use auks_client::Client;
 use auks_config::{ClientConfig, parse_file};
@@ -30,11 +31,14 @@ mod generated {
 struct PluginState {
     config: PluginConfig,
     credcache: Option<String>,
+    renewer_ccache: Option<String>,
     file_credcache: bool,
     renewer_pid: Option<libc::pid_t>,
     exited_tasks: u32,
     synced: bool,
 }
+
+type CcacheResult = (Option<(String, bool)>, Option<String>);
 
 static STATE: Mutex<PluginState> = Mutex::new(PluginState {
     config: PluginConfig {
@@ -49,6 +53,7 @@ static STATE: Mutex<PluginState> = Mutex::new(PluginState {
         minimum_uid: None,
     },
     credcache: None,
+    renewer_ccache: None,
     file_credcache: false,
     renewer_pid: None,
     exited_tasks: 0,
@@ -134,6 +139,7 @@ fn update_config(parsed_config: PluginConfig) {
     if let Ok(mut state) = STATE.lock() {
         state.config = parsed_config;
         state.credcache = None;
+        state.renewer_ccache = None;
         state.file_credcache = false;
         state.renewer_pid = None;
         state.exited_tasks = 0;
@@ -310,14 +316,14 @@ fn remote_init(spank: Spank) -> c_int {
     };
     let cred_data = cred.data.clone();
     let existing_ccache = spank.getenv("KRB5CCNAME");
-    let result = as_user(uid, gid, || -> Result<Option<(String, bool)>, String> {
+    let result = as_user(uid, gid, || -> Result<CcacheResult, String> {
         if let Some(existing) = existing_ccache
             && let Ok(context) = Context::new()
             && let Ok(cache) = context.resolve_ccache(&existing)
             && cred_blob::get(&context, &cache).is_ok()
         {
             log::info(&format!("spank-auks-rs: user '{uid}' cred found in ccache"));
-            return Ok(None);
+            return Ok((None, Some(existing)));
         }
         let context = Context::new().map_err(|error| error.to_string())?;
         let (name, file_cache) = if plugin_config.force_file_ccache {
@@ -363,7 +369,7 @@ fn remote_init(spank: Spank) -> c_int {
         if let Some(script) = helper_script.as_deref() {
             run_helper(script, &name, uid, gid)?;
         }
-        Ok(Some((name, file_cache)))
+        Ok((Some((name, file_cache)), None))
     });
     let result = match result {
         Ok(Ok(value)) => value,
@@ -380,11 +386,13 @@ fn remote_init(spank: Spank) -> c_int {
             return -1;
         }
     };
-    if let Some((name, file_cache)) = result
-        && let Ok(mut state) = STATE.lock()
-    {
-        state.credcache = Some(name);
-        state.file_credcache = file_cache;
+    if let Ok(mut state) = STATE.lock() {
+        let (created, reused) = result;
+        if let Some((name, file_cache)) = created {
+            state.credcache = Some(name);
+            state.file_credcache = file_cache;
+        }
+        state.renewer_ccache = reused;
     }
     0
 }
@@ -445,48 +453,161 @@ fn renewer_init(spank: Spank) -> c_int {
     ) {
         return 0;
     }
-    let cache = STATE.lock().ok().and_then(|state| state.credcache.clone());
-    let cache_c = cache.as_deref().and_then(|value| CString::new(value).ok());
-    let executable =
-        CString::new(format!("{}/auks", env!("AUKS_BINDIR"))).expect("valid renewer executable");
-    let arg_r = CString::new("-R").expect("valid argument");
-    let arg_loop = CString::new("loop").expect("valid argument");
+    let cache = STATE.lock().ok().and_then(|state| {
+        state
+            .renewer_ccache
+            .clone()
+            .or_else(|| state.credcache.clone())
+    });
+    let cache_c = cache
+        .as_deref()
+        .map(|value| CString::new(value).map_err(|error| error.to_string()));
+    let cache_c = match cache_c.transpose() {
+        Ok(value) => value,
+        Err(error) => {
+            log::error(&format!(
+                "spank-auks-rs: unable to launch renewer process: ccache: {error}"
+            ));
+            return -1;
+        }
+    };
+    let executable = match CString::new(format!("{}/auks", env!("AUKS_BINDIR"))) {
+        Ok(value) => value,
+        Err(error) => {
+            log::error(&format!(
+                "spank-auks-rs: unable to launch renewer process: executable: {error}"
+            ));
+            return -1;
+        }
+    };
+    let arg_r = c"-R";
+    let arg_loop = c"loop";
+    let auks_conf = std::env::var_os("AUKS_CONF")
+        .and_then(|value| CString::new(value.to_string_lossy().as_bytes()).ok());
+    let path = c"/usr/bin:/bin";
+    let mut status_fds = [0; 2];
+    if unsafe { libc::pipe2(status_fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+        let error = io::Error::last_os_error();
+        log::error(&format!(
+            "spank-auks-rs: unable to launch renewer process: pipe2: {error}"
+        ));
+        return -1;
+    }
+    if status_fds[1] < 3 {
+        let duplicate = unsafe { libc::fcntl(status_fds[1], libc::F_DUPFD_CLOEXEC, 3) };
+        if duplicate < 0 {
+            let error = io::Error::last_os_error();
+            unsafe {
+                libc::close(status_fds[0]);
+                libc::close(status_fds[1]);
+            }
+            log::error(&format!(
+                "spank-auks-rs: unable to launch renewer process: fcntl: {error}"
+            ));
+            return -1;
+        }
+        unsafe {
+            libc::close(status_fds[1]);
+        }
+        status_fds[1] = duplicate;
+    }
     let pid = unsafe { libc::fork() };
     if pid < 0 {
-        log::error("spank-auks-rs: unable to launch renewer process");
+        let error = io::Error::last_os_error();
+        unsafe {
+            libc::close(status_fds[0]);
+            libc::close(status_fds[1]);
+        }
+        log::error(&format!(
+            "spank-auks-rs: unable to launch renewer process: fork: {error}"
+        ));
         return -1;
     }
     if pid == 0 {
         unsafe {
-            let egid = libc::getegid();
-            let euid = libc::geteuid();
-            if libc::setresgid(egid, egid, egid) != 0 || libc::setresuid(euid, euid, euid) != 0 {
-                libc::_exit(1);
-            }
-            let mut mask = std::mem::zeroed();
-            libc::sigemptyset(&mut mask);
-            libc::sigprocmask(libc::SIG_SETMASK, &mask, std::ptr::null_mut());
-            let fd = libc::open(c"/dev/null".as_ptr(), libc::O_RDWR | libc::O_CLOEXEC);
-            if fd >= 0 {
-                libc::dup2(fd, libc::STDIN_FILENO);
-                libc::dup2(fd, libc::STDOUT_FILENO);
-                libc::dup2(fd, libc::STDERR_FILENO);
-            }
-            if let Some(cache) = cache_c.as_ref() {
-                libc::setenv(c"KRB5CCNAME".as_ptr(), cache.as_ptr(), 1);
-            }
-            if libc::chdir(c"/".as_ptr()) != 0 {
-                libc::_exit(1);
-            }
-            let argv = [
+            libc::close(status_fds[0]);
+            renewer_child(
+                status_fds[1],
+                cache_c
+                    .as_ref()
+                    .map_or(std::ptr::null(), |value| value.as_ptr()),
+                auks_conf
+                    .as_ref()
+                    .map_or(std::ptr::null(), |value| value.as_ptr()),
                 executable.as_ptr(),
                 arg_r.as_ptr(),
                 arg_loop.as_ptr(),
-                std::ptr::null(),
-            ];
-            libc::execv(executable.as_ptr(), argv.as_ptr());
-            libc::_exit(1);
+                path.as_ptr(),
+            );
         }
+    }
+    unsafe {
+        libc::close(status_fds[1]);
+    }
+    let mut status = [0u8; 2];
+    let mut offset = 0;
+    loop {
+        let result = unsafe {
+            libc::read(
+                status_fds[0],
+                status[offset..].as_mut_ptr().cast(),
+                status.len() - offset,
+            )
+        };
+        if result == 0 {
+            break;
+        }
+        if result < 0 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            unsafe {
+                libc::close(status_fds[0]);
+                libc::waitpid(pid, std::ptr::null_mut(), 0);
+            }
+            log::error(&format!(
+                "spank-auks-rs: unable to launch renewer process: status pipe: {error}"
+            ));
+            return -1;
+        }
+        offset += result as usize;
+        if offset >= status.len() {
+            break;
+        }
+    }
+    unsafe {
+        libc::close(status_fds[0]);
+    }
+    if offset != 0 {
+        let step = match status[0] {
+            1 => "setresgid",
+            2 => "setresuid",
+            3 => "setsid",
+            4 => "sigprocmask",
+            5 => "sigaction",
+            6 => "open",
+            7 => "dup2",
+            8 => "clearenv",
+            9 => "setenv",
+            10 => "chdir",
+            11 => "close_range",
+            12 => "execv",
+            _ => "child setup",
+        };
+        let code = if offset > 1 {
+            i32::from(status[1])
+        } else {
+            libc::EIO
+        };
+        let error = io::Error::from_raw_os_error(code);
+        unsafe {
+            libc::waitpid(pid, std::ptr::null_mut(), 0);
+        }
+        log::error(&format!(
+            "spank-auks-rs: unable to launch renewer process: {step}: {error}"
+        ));
+        return -1;
     }
     if let Ok(mut state) = STATE.lock() {
         state.renewer_pid = Some(pid);
@@ -495,6 +616,111 @@ fn renewer_init(spank: Spank) -> c_int {
         "spank-auks-rs: credential renewer launched (pid={pid})"
     ));
     0
+}
+
+#[allow(unsafe_op_in_unsafe_fn)]
+unsafe fn renewer_child(
+    status_fd: libc::c_int,
+    cache: *const c_char,
+    auks_conf: *const c_char,
+    executable: *const c_char,
+    arg_r: *const c_char,
+    arg_loop: *const c_char,
+    path: *const c_char,
+) -> ! {
+    let fail = |step: u8| -> ! {
+        let error = *libc::__errno_location();
+        let bytes = [step, error as u8];
+        let _ = libc::write(status_fd, bytes.as_ptr().cast(), bytes.len());
+        libc::_exit(127);
+    };
+    let egid = libc::getegid();
+    let euid = libc::geteuid();
+    if libc::setresgid(egid, egid, egid) != 0 {
+        fail(1);
+    }
+    if libc::setresuid(euid, euid, euid) != 0 {
+        fail(2);
+    }
+    if libc::setsid() < 0 {
+        fail(3);
+    }
+    let mut mask = std::mem::zeroed();
+    if libc::sigemptyset(&mut mask) != 0
+        || libc::sigprocmask(libc::SIG_SETMASK, &mask, std::ptr::null_mut()) != 0
+    {
+        fail(4);
+    }
+    for signal in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP, libc::SIGPIPE] {
+        let mut action: libc::sigaction = std::mem::zeroed();
+        action.sa_sigaction = libc::SIG_DFL;
+        libc::sigemptyset(&mut action.sa_mask);
+        if libc::sigaction(signal, &action, std::ptr::null_mut()) != 0 {
+            fail(5);
+        }
+    }
+    let null_fd = libc::open(c"/dev/null".as_ptr(), libc::O_RDWR);
+    if null_fd < 0 {
+        fail(6);
+    }
+    for target in [libc::STDIN_FILENO, libc::STDOUT_FILENO, libc::STDERR_FILENO] {
+        if libc::dup2(null_fd, target) < 0 {
+            fail(7);
+        }
+    }
+    if null_fd > libc::STDERR_FILENO {
+        libc::close(null_fd);
+    }
+    let mut close_range_supported = true;
+    if status_fd > 3 && libc::close_range(3, status_fd as libc::c_uint - 1, 0) != 0 {
+        if *libc::__errno_location() == libc::ENOSYS {
+            close_range_supported = false;
+        } else {
+            fail(11);
+        }
+    }
+    if close_range_supported
+        && libc::close_range(status_fd as libc::c_uint + 1, libc::c_uint::MAX, 0) != 0
+    {
+        if *libc::__errno_location() == libc::ENOSYS {
+            close_range_supported = false;
+        } else {
+            fail(11);
+        }
+    }
+    if !close_range_supported {
+        close_fds_except(status_fd);
+    }
+    if libc::clearenv() != 0 {
+        fail(8);
+    }
+    if !cache.is_null() && libc::setenv(c"KRB5CCNAME".as_ptr(), cache, 1) != 0 {
+        fail(9);
+    }
+    if !auks_conf.is_null() && libc::setenv(c"AUKS_CONF".as_ptr(), auks_conf, 1) != 0 {
+        fail(9);
+    }
+    if libc::setenv(c"PATH".as_ptr(), path, 1) != 0 {
+        fail(9);
+    }
+    if libc::chdir(c"/".as_ptr()) != 0 {
+        fail(10);
+    }
+    let argv = [executable, arg_r, arg_loop, std::ptr::null()];
+    libc::execv(executable, argv.as_ptr());
+    fail(12);
+}
+
+#[allow(unsafe_op_in_unsafe_fn)]
+unsafe fn close_fds_except(status_fd: libc::c_int) {
+    let max = libc::sysconf(libc::_SC_OPEN_MAX);
+    if max > 3 {
+        for fd in 3..max as libc::c_int {
+            if fd != status_fd {
+                libc::close(fd);
+            }
+        }
+    }
 }
 
 fn task_exit(spank: Spank) -> c_int {
@@ -535,21 +761,42 @@ fn task_exit(spank: Spank) -> c_int {
     log::info(&format!(
         "spank-auks-rs: all tasks exited, killing credential renewer (pid={pid})"
     ));
-    let result = as_user(uid, gid, || {
+    let timed_out = match as_user(uid, gid, || {
         sync_files(&mut state);
         if unsafe { libc::kill(pid, libc::SIGTERM) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        for _ in 0..50 {
+            let result = unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) };
+            if result == pid {
+                return Ok(false);
+            }
+            if result < 0 {
+                let error = io::Error::last_os_error();
+                if error.raw_os_error() != Some(libc::EINTR) {
+                    return Err(error);
+                }
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        log::error("spank-auks-rs: renewer did not exit within 5s, killing");
+        if unsafe { libc::kill(pid, libc::SIGKILL) } != 0 {
             return Err(io::Error::last_os_error());
         }
         if unsafe { libc::waitpid(pid, std::ptr::null_mut(), 0) } < 0 {
             return Err(io::Error::last_os_error());
         }
-        Ok(())
-    });
+        Ok(true)
+    }) {
+        Ok(value) => value,
+        Err(error) => {
+            state.renewer_pid = None;
+            log::error(&format!("spank-auks-rs: unable to stop renewer: {error}"));
+            return -1;
+        }
+    };
     state.renewer_pid = None;
-    if let Err(error) = result {
-        log::error(&format!("spank-auks-rs: unable to stop renewer: {error}"));
-        return -1;
-    }
+    let _ = timed_out;
     0
 }
 

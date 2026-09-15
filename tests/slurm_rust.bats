@@ -123,6 +123,20 @@ wait_for_log() {
     wait_for_log "all tasks exited, killing credential renewer"
 }
 
+@test "renewer is isolated from the step environment and descriptors" {
+    prepare_user
+    run srun --auks=yes sh -c '
+        pid=$(pgrep -f "[a]uks -R loop" | head -1)
+        test -n "$pid"
+        tr "\0" "\n" < "/proc/$pid/environ" > /tmp/renewer-env
+        ! grep -q "^SLURM_" /tmp/renewer-env
+        grep -q "^KRB5CCNAME=" /tmp/renewer-env
+        grep -q "^AUKS_CONF=/conf/auks.conf$" /tmp/renewer-env
+        test "$(find "/proc/$pid/fd" -mindepth 1 -maxdepth 1 -printf "%f\n" | sort | tr "\n" " ")" = "0 1 2 "
+    '
+    [ "$status" -eq 0 ]
+}
+
 @test "invalid --auks value fails" {
     run srun --auks=bogus true
     [ "$status" -ne 0 ]

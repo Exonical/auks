@@ -36,3 +36,22 @@ teardown() {
     [ "$status" -eq 0 ]
     klist -c "$USER_CCACHE" | grep -F 'user@EXAMPLE.COM'
 }
+
+@test "Rust add transforms address-bound credentials" {
+    sed '/default_realm = EXAMPLE.COM/a\    noaddresses = false' \
+        /etc/krb5.conf > /tmp/client-rust-addresses.conf
+    KRB5_CONFIG=/tmp/client-rust-addresses.conf \
+        kinit -k -t "$USER_KEYTAB" -c "$USER_CCACHE" user
+    run env KRB5_CONFIG=/tmp/client-rust-addresses.conf \
+        klist -a -n -c "$USER_CCACHE"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Addresses:"* ]]
+    export KRB5_CONFIG=/tmp/client-rust-addresses.conf
+    export KRB5CCNAME="FILE:$USER_CCACHE"
+    auksctl-rs -c /conf/auks.conf add "$KRB5CCNAME"
+    auks -f /conf/auks.conf --send --uid 1234 |
+        auks -f /conf/auks.conf --receive --ccache /tmp/client-rust-addressless
+    run klist -a -n -c /tmp/client-rust-addressless
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Addresses: (none)"* ]]
+}

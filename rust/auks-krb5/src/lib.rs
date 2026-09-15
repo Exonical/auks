@@ -835,6 +835,43 @@ pub mod cred_blob {
         }
     }
 
+    struct CredContents<'c> {
+        context: &'c Context,
+        value: sys::krb5_creds,
+    }
+
+    impl<'c> CredContents<'c> {
+        fn new(context: &'c Context) -> Self {
+            Self {
+                context,
+                value: sys::krb5_creds::default(),
+            }
+        }
+    }
+
+    impl Drop for CredContents<'_> {
+        fn drop(&mut self) {
+            unsafe {
+                sys::krb5_free_cred_contents(self.context.raw(), &mut self.value);
+            }
+        }
+    }
+
+    struct OwnedCred<'c> {
+        context: &'c Context,
+        ptr: *mut sys::krb5_creds,
+    }
+
+    impl Drop for OwnedCred<'_> {
+        fn drop(&mut self) {
+            if !self.ptr.is_null() {
+                unsafe {
+                    sys::krb5_free_creds(self.context.raw(), self.ptr);
+                }
+            }
+        }
+    }
+
     /// Credential metadata extracted from a KRB-CRED blob.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct BlobInfo {
@@ -863,6 +900,29 @@ pub mod cred_blob {
         let result = unsafe { bytes(&*data).to_vec() };
         unsafe { sys::krb5_free_data(context.raw(), data) };
         Ok(result)
+    }
+
+    struct OwnedData<'c> {
+        context: &'c Context,
+        ptr: *mut sys::krb5_data,
+    }
+
+    impl Drop for OwnedData<'_> {
+        fn drop(&mut self) {
+            if !self.ptr.is_null() {
+                unsafe {
+                    sys::krb5_free_data(self.context.raw(), self.ptr);
+                }
+            }
+        }
+    }
+
+    impl<'c> OwnedData<'c> {
+        fn into_bytes(mut self, op: &'static str) -> Result<Vec<u8>> {
+            let ptr = self.ptr;
+            self.ptr = ptr::null_mut();
+            copy_data(self.context, ptr, op)
+        }
     }
 
     /// Serializes TGT credentials from a cache.
@@ -1070,8 +1130,22 @@ pub mod cred_blob {
         if credentials.ptr.is_null() || unsafe { (*credentials.ptr).is_null() } {
             return Err(Error::input("krb5_mk_1cred", "credential list is empty"));
         }
+        serialize_cred(context, auth, unsafe { *credentials.ptr })
+    }
+
+    fn serialize_cred(
+        context: &Context,
+        auth: &mut AuthContext<'_>,
+        credential: *mut sys::krb5_creds,
+    ) -> Result<Vec<u8>> {
+        if credential.is_null() {
+            return Err(Error::input("krb5_mk_1cred", "credential is null"));
+        }
         auth.set_flags(0)?;
-        let mut output = ptr::null_mut();
+        let mut output = OwnedData {
+            context,
+            ptr: ptr::null_mut(),
+        };
         let mut replay = sys::krb5_replay_data::default();
         unsafe {
             check(
@@ -1079,14 +1153,203 @@ pub mod cred_blob {
                 sys::krb5_mk_1cred(
                     context.raw(),
                     auth.raw,
-                    *credentials.ptr,
-                    &mut output,
+                    credential,
+                    &mut output.ptr,
                     &mut replay,
                 ),
                 "krb5_mk_1cred",
             )?;
         }
-        copy_data(context, output, "krb5_mk_1cred")
+        output.into_bytes("krb5_mk_1cred")
+    }
+
+    fn copy_principal(
+        context: &Context,
+        principal: sys::krb5_principal,
+    ) -> Result<sys::krb5_principal> {
+        let mut output = ptr::null_mut();
+        unsafe {
+            check(
+                context.raw(),
+                sys::krb5_copy_principal(context.raw(), principal, &mut output),
+                "krb5_copy_principal",
+            )?;
+        }
+        Ok(output)
+    }
+
+    fn unparse_principal(context: &Context, principal: sys::krb5_principal) -> Result<String> {
+        let mut output = ptr::null_mut();
+        unsafe {
+            check(
+                context.raw(),
+                sys::krb5_unparse_name(context.raw(), principal, &mut output),
+                "krb5_unparse_name",
+            )?;
+            let result = CStr::from_ptr(output).to_string_lossy().into_owned();
+            sys::krb5_free_string(context.raw(), output);
+            Ok(result)
+        }
+    }
+
+    fn principal_realm(principal: sys::krb5_principal) -> Result<String> {
+        if principal.is_null() {
+            return Err(Error::input("krb5_principal", "principal is null"));
+        }
+        unsafe {
+            let realm = &(*principal).realm;
+            Ok(String::from_utf8_lossy(bytes(realm)).into_owned())
+        }
+    }
+
+    fn request_options(credential: *mut sys::krb5_creds) -> sys::krb5_flags {
+        unsafe {
+            (sys::KDC_OPT_CANONICALIZE
+                | sys::KDC_OPT_FORWARDED
+                | (((*credential).ticket_flags as u32) & sys::KDC_TKT_COMMON_MASK))
+                as sys::krb5_flags
+        }
+    }
+
+    /// Removes network addresses from the local TGT in a serialized credential.
+    pub fn deladdr(context: &Context, blob: &[u8]) -> Result<Vec<u8>> {
+        let mut auth = context.auth_context()?;
+        auth.set_flags(0)?;
+        let mut data = sys::krb5_data {
+            magic: 0,
+            length: blob.len() as u32,
+            data: blob.as_ptr() as *mut _,
+        };
+        let mut credentials = ptr::null_mut();
+        let mut replay = sys::krb5_replay_data::default();
+        unsafe {
+            check(
+                context.raw(),
+                sys::krb5_rd_cred(
+                    context.raw(),
+                    auth.raw,
+                    &mut data,
+                    &mut credentials,
+                    &mut replay,
+                ),
+                "krb5_rd_cred",
+            )?;
+        }
+        let credentials = TgtCreds::new(context, credentials);
+        let mut item = credentials.ptr;
+        let local = unsafe {
+            while !item.is_null() && !(*item).is_null() {
+                let credential = *item;
+                let client_realm = principal_realm((*credential).client)?;
+                let server = unparse_principal(context, (*credential).server)?;
+                if server == format!("krbtgt/{client_realm}@{client_realm}") {
+                    break;
+                }
+                item = item.add(1);
+            }
+            if item.is_null() || (*item).is_null() {
+                return Err(Error::input("krb5_get_cred_via_tkt", "no local TGT found"));
+            }
+            *item
+        };
+        let mut desired = CredContents::new(context);
+        desired.value.client = copy_principal(context, unsafe { (*local).client })?;
+        desired.value.server = copy_principal(context, unsafe { (*local).server })?;
+        let mut output = OwnedCred {
+            context,
+            ptr: ptr::null_mut(),
+        };
+        unsafe {
+            check(
+                context.raw(),
+                sys::krb5_get_cred_via_tkt(
+                    context.raw(),
+                    local,
+                    request_options(local),
+                    ptr::null(),
+                    &mut desired.value,
+                    &mut output.ptr,
+                ),
+                "krb5_get_cred_via_tkt",
+            )?;
+        }
+        serialize_cred(context, &mut auth, output.ptr)
+    }
+
+    /// Adds a cross-realm TGT to a serialized credential.
+    pub fn cross_realm(context: &Context, realm: &str, blob: &[u8]) -> Result<Vec<u8>> {
+        let realm = c_string(realm, "krb5_cross_realm")?;
+        let mut auth = context.auth_context()?;
+        auth.set_flags(0)?;
+        let mut data = sys::krb5_data {
+            magic: 0,
+            length: blob.len() as u32,
+            data: blob.as_ptr() as *mut _,
+        };
+        let mut credentials = ptr::null_mut();
+        let mut replay = sys::krb5_replay_data::default();
+        unsafe {
+            check(
+                context.raw(),
+                sys::krb5_rd_cred(
+                    context.raw(),
+                    auth.raw,
+                    &mut data,
+                    &mut credentials,
+                    &mut replay,
+                ),
+                "krb5_rd_cred",
+            )?;
+        }
+        let credentials = TgtCreds::new(context, credentials);
+        if credentials.ptr.is_null() || unsafe { (*credentials.ptr).is_null() } {
+            return Err(Error::input("krb5_rd_cred", "credential list is empty"));
+        }
+        let source = unsafe { *credentials.ptr };
+        let client_realm = principal_realm(unsafe { (*source).server })?;
+        let target = format!("krbtgt/{}@{}", realm.to_string_lossy(), client_realm);
+        let target = context.parse_name(&target)?;
+        let mut desired = CredContents::new(context);
+        desired.value.client = copy_principal(context, unsafe { (*source).client })?;
+        desired.value.server = target.raw;
+        std::mem::forget(target);
+        let mut output = OwnedCred {
+            context,
+            ptr: ptr::null_mut(),
+        };
+        unsafe {
+            check(
+                context.raw(),
+                sys::krb5_get_cred_via_tkt(
+                    context.raw(),
+                    source,
+                    request_options(source),
+                    ptr::null(),
+                    &mut desired.value,
+                    &mut output.ptr,
+                ),
+                "krb5_get_cred_via_tkt",
+            )?;
+        }
+        let mut values = [source, output.ptr, ptr::null_mut()];
+        let mut encoded = OwnedData {
+            context,
+            ptr: ptr::null_mut(),
+        };
+        unsafe {
+            check(
+                context.raw(),
+                sys::krb5_mk_ncred(
+                    context.raw(),
+                    auth.raw,
+                    values.as_mut_ptr(),
+                    &mut encoded.ptr,
+                    &mut replay,
+                ),
+                "krb5_mk_ncred",
+            )?;
+        }
+        encoded.into_bytes("krb5_mk_ncred")
     }
 }
 
