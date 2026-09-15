@@ -1,165 +1,302 @@
-# SPANK plugin overhaul plan
+# SPANK plugin overhaul and Rust migration plan
 
-Derived from `AUDIT.md`. Goal: a plugin that is correct against the SPANK
-contract as documented (not as observed), keeps no cross-hook global state,
-does privileged work in the smallest window possible, and is tested in CI
-against a real Slurm. Protocol/daemon changes (A1) are scoped as a separate,
-later phase so the plugin rewrite can ship against the existing `auksd`.
+Derived from `AUDIT.md`. Two goals, delivered together:
 
-Nothing below is implemented; each phase is sized so it can be reviewed as
-one PR.
+1. A SPANK plugin that is correct against the SPANK contract as documented
+   (not as observed), keeps no cross-hook global state, does privileged work
+   in the smallest window possible, and is tested in CI against a real Slurm.
+2. Migration of AUKS to Rust — plugin first, then the client side (library,
+   CLI, renewer), then `auksd`/`auksdrenewer` — without a flag-day: every
+   Rust component speaks today's wire protocol and reads today's config
+   files, so C and Rust binaries can be mixed during rollout.
+
+Nothing below is implemented; each phase is sized to be reviewable as one PR
+or a short series. Facts about third-party crates were checked on
+crates.io/docs.rs at planning time and are summarised in §"Ecosystem
+survey"; re-verify before depending on them.
 
 ## Guiding decisions
 
-1. **Wire compatibility first.** Phases 0-3 talk to today's `auksd` and
-   accept today's `plugstack.conf` arguments (with deprecation warnings).
-   Operators can upgrade compute nodes independently.
-2. **One state struct, keyed by `spank_t`.** All per-step state lives in a
-   heap `struct auks_spank_ctx` created in `slurm_spank_init` and freed in
-   `slurm_spank_exit`. Options parsed from `plugstack.conf` go into a
-   `const` config struct filled once. No file-scope mutable globals except
-   the pointer to the ctx.
-3. **Move work to the right hook.**
-   * `slurm_spank_init` (remote): parse options, read `S_JOB_*` items, decide
-     mode. No network, no ccache.
-   * `slurm_spank_init_post_opt` (remote): remote `--auks` options are now
-     visible; final mode decision.
-   * `slurm_spank_user_init` (remote, euid=user, inside job container):
-     GET from auksd, create ccache, store, `spank_setenv`, run helper,
-     launch renewer. Everything that touches the user's ccache happens
-     here, in the user's namespaces, with the real euid rather than a
-     per-thread `setresuid` hack.
-   * `slurm_spank_task_exit`/`slurm_spank_exit`: stop renewer, destroy
-     ccache — driven by ctx state, not by a task counter.
+### D1. Keep MIT libkrb5; bind it ourselves
 
-   The GET needs the host credential (root). Two options, decide in Phase 1
-   after the CLONE_VM check (Audit D): (a) do the GET in `init_post_opt` as
-   root into memory, hand the serialised cred to `user_init` through ctx;
-   (b) keep the GET in `user_init` and read `hostcredcache` with a
-   `setresuid` round-trip. (a) is preferred: the cred blob is small, and it
-   removes all uid juggling from the plugin.
-4. **Renewer as a proper child.** Spawn with `posix_spawn`/`fork`+`exec`
-   under a `closefrom(3)` sweep, in its own process group/session, with a
-   pidfile-free handle (pidfd on Linux ≥ 5.3, else pid + start-time check).
-   Give `auks -R loop` a `SIGTERM` handler that destroys nothing (the plugin
-   owns the ccache) and exits promptly. Bound `waitpid` with a timeout, then
-   `SIGKILL`.
-5. **Fail loudly.** Any failure in enabled mode returns `ESPANK_ERROR` with
-   a message via `slurm_error`, and `HOWTO` recommends `required` for
-   kerberised partitions. `optional` remains a supported deployment but
-   stops being the default recommendation.
-6. **Test it.** Extend the compose rig with a `slurmctld`+`slurmd` node,
-   build `auks.so` with `--with-slurm`, and add bats cases that submit jobs
-   and assert on `klist` inside the step.
+A pure-Rust Kerberos stack (`krb5-rs`, `rskrb5`, `kerbeiros`, `picky-krb`,
+`kerbcore`) is not mature enough for a credential vault: none of them
+ships a production-grade combination of `KRB-CRED` forwarding, `KRB-PRIV`
+streams, replay cache, TGS renewal and MIT ccache-collection semantics, and
+the two that come closest are pre-1.0 with < 100 downloads (`krb5-rs`
+explicitly lists TGT renewal as unimplemented). Licensing is also mixed
+(AGPL-3.0 for `kerbeiros`).
+
+Existing libkrb5 bindings are either unmaintained (`krb5-sys` 0.3.0 from
+2019, "incomplete"; `libkrb5[-sys]` 0.0.3 from 2022), GPL-3.0
+(`kerberos-sys`), or brand new (`kurbu5-sys`). AUKS uses a small, stable
+subset of the API (~25 functions), so we own the binding:
+
+* `auks-krb5-sys`: `bindgen` at build time against the system `krb5.h`
+  with an allowlist of exactly the symbols we use. No vendored library
+  (`krb5-src` pins 1.19.2; we want the distro's krb5 for CVE fixes and
+  `krb5.conf` behaviour).
+* `auks-krb5`: safe wrappers — `Context`, `Principal`, `Ccache`
+  (`new_unique`, `switch`, `destroy`, `store`, `default_name`), `Creds`
+  (`get_tgt`, `renew`, `mk_ncred`/`rd_cred` for the serialised blob,
+  `deladdr` via TGS, `cross_realm`), `AuthStream` (`sendauth`/`recvauth`,
+  `mk_priv`/`rd_priv` with `DO_SEQUENCE`, NAT/rcache flags),
+  `aname_to_localname`. Every `krb5_error_code` becomes a typed error
+  carrying `krb5_get_error_message`.
+
+### D2. Wire compatibility is a hard requirement for Phases 1-4
+
+`auks-proto` re-implements `auks_buffer`/`auks_message` byte-for-byte
+(`htonl` ints, `uid` as `int`, raw `len`+bytes; request/reply type numbers
+from `auks_message.h`) and `auks-cred` re-implements the serialised
+`auks_cred_t` (`info` struct + `krb5_mk_ncred` payload). Compatibility is
+proven by differential tests, not by reading: the compose rig runs every
+combination of {C, Rust} × {client, daemon} through `tests/simple.bats`.
+
+A GSSAPI-based protocol v2 (`libgssapi` 0.11 is maintained and covers
+`init/accept_sec_context` + `wrap/unwrap`) is attractive but is a
+wire-protocol break. It is parked under Phase 5 together with the
+job-scoped authorisation work (A1), which needs a new message type anyway.
+
+### D3. SPANK plugin in Rust as a `cdylib` with the exact C ABI
+
+Slurm loads the plugin by `dlopen` and resolves fixed symbols. From
+`slurm/spank.h` (master):
+
+```c
+#define SPANK_PLUGIN(__name, __ver)
+  const char plugin_name[] = #__name;
+  const char plugin_type[] = "spank";
+  const unsigned int plugin_version = SLURM_VERSION_NUMBER;
+  const unsigned int spank_plugin_version = __ver;   /* absent in 20.11, present in master */
+typedef int (spank_f)(spank_t, int ac, char *argv[]);
+```
+
+We export `plugin_name`, `plugin_type`, `plugin_version`,
+`spank_plugin_version` and the five `#[no_mangle] extern "C" fn
+slurm_spank_{init,init_post_opt,user_init,task_exit,exit}` we need
+(`local_user_init` may be added). `plugin_version` must match the loading
+Slurm's `SLURM_VERSION_NUMBER`, so the crate reads it from the `slurm.h`
+it is built against — one build per supported Slurm major.minor, exactly as
+today.
+
+Sharp edge: `spank_get_item` is variadic with item-dependent argument
+types. The FFI layer exposes typed accessors only (`job_id() ->
+Result<u32>`, `job_uid() -> uid_t`, `job_gid()`, `local_task_count()`,
+`task_exit_status()`), never a variadic passthrough.
+
+Prior art: `slurm-spank` 0.4.1 (`fdiakh/slurm-spank-rs`, Apache-2.0,
+updated 2025-11) provides `SPANK_PLUGIN!`, a `Plugin` trait, typed
+`get_item` and option registration. Decision: **prototype on
+`slurm-spank` in Phase 1**; if its MSRV, Slurm-version coverage or hook
+set does not fit, replace it with our own ~300-line shim (`auks-spank-sys`)
+— the surface we need is small. Either way the plugin logic depends on a
+trait, not on the crate.
+
+### D4. One state struct per step, work in the right hook
+
+Unchanged from the C-side design, now enforced by the language:
+
+* `struct Conf` parsed once from `plugstack.conf` args (table-driven; unknown
+  key → `ESPANK_BAD_ARG` + `slurm_error`). `struct StepCtx { mode, jobid,
+  uid, gid, cred: Option<SerialisedCred>, ccache: Option<CcacheName>,
+  renewer: Option<Child> }` created in `slurm_spank_init`, stored behind a
+  `OnceLock<Mutex<…>>` (Slurm calls hooks from one thread but we don't rely
+  on it), dropped in `slurm_spank_exit`.
+* `slurm_spank_init` (remote): options + `S_JOB_*` items; no network.
+* `slurm_spank_init_post_opt` (remote, root): final mode; `GET` from auksd
+  using the host ccache into memory (`cred: Some(..)`). No uid switching.
+* `slurm_spank_user_init` (remote, euid=user, inside job container): create
+  ccache with the *user's* default type (`krb5_cc_default_name` after
+  Slurm's privilege drop → honours `/run/user/%{uid}` / `KEYRING` policy),
+  store, `cc_switch` unless disabled, `spank_setenv KRB5CCNAME`, run
+  helper (with timeout), spawn renewer. Removes the per-thread
+  `syscall(SYS_setresuid)` hack entirely.
+* `slurm_spank_task_exit` (last task) and `slurm_spank_exit`: stop renewer,
+  destroy ccache; `exit` is the authoritative teardown.
+
+This depends on the Audit D check that `user_init`'s child shares memory
+with the parent (`clone(CLONE_VM)`); if a target Slurm uses plain `fork`,
+`StepCtx` is written to a small state file under `/run/auks/<jobid>.<step>`
+instead. Settle in Phase 0.
+
+### D5. Renewer as a supervised child
+
+`std::process::Command` with `pre_exec` doing `setsid()` and a
+`close_range(3, ~0)` sweep (Rust already sets `CLOEXEC` on fds it opens;
+inherited `slurmstepd` fds do not get that for free), `stdio` to
+`/dev/null`, env limited to `KRB5CCNAME`, `AUKS_CONF`, `PATH`. Handle kept
+as a pidfd (`pidfd_open`, Linux ≥ 5.3; fallback pid + `/proc/<pid>/stat`
+start-time check). Shutdown: `SIGTERM`, wait ≤ 5 s, `SIGKILL`. The Rust
+`auks -R loop` handles `SIGTERM` and exits without touching the ccache.
+
+### D6. Fail loudly
+
+Any failure in enabled mode returns `ESPANK_ERROR` with a
+`slurm_error` message; docs recommend `required` for kerberised partitions.
+
+### D7. Toolchain and packaging
+
+* MSRV: **1.75** if the EL8 AppStream compiler is a hard requirement
+  (AlmaLinux 8.10 ships 1.75.0; EL9 ships 1.79 → 1.88 depending on point
+  release). This rules out crates whose metadata demands 1.85+ (`picky-krb`,
+  `sspi`), none of which we need under D1. Open question Q1.
+* Build: Cargo workspace under `rust/`; autotools keeps building the C
+  components until each is retired, and gains a `--enable-rust` switch that
+  runs `cargo build --release --locked` and installs the artefacts to the
+  same paths. RPM: `cargo vendor` tarball as `Source1`, `%cargo_*` macros
+  from `rust-packaging` (EL8: `rust-toolset` module).
+* Binary names and paths are unchanged (`/usr/bin/auks`, `/usr/sbin/auksd`,
+  `$libdir/slurm/auks.so`), so `plugstack.conf`, systemd units, `aukspriv`
+  and the HOWTO stay valid.
+
+### D8. Test everything through the compose rig
+
+Extend `compose.yaml` with `slurmctld`+`slurmd`+`munge`, build both the C
+and Rust plugin with `--with-slurm`, and add bats cases that submit jobs and
+assert on `klist` inside the step. Rust unit tests cover `auks-proto`
+(golden byte vectors captured from the C implementation), ACL parsing and
+config parsing.
+
+## Workspace layout
+
+```
+rust/
+  Cargo.toml            workspace, MSRV, lints (unsafe_op_in_unsafe_fn, missing_docs on pub)
+  auks-krb5-sys/        bindgen allowlist over krb5.h            (Phase 1)
+  auks-krb5/            safe wrappers (D1)                        (Phase 1)
+  auks-proto/           buffer/message codec, request/reply enums (Phase 1)
+  auks-cred/            auks_cred_t (info + blob), pack/unpack    (Phase 1)
+  auks-config/          auks.conf / auks.acl parsers (same grammar, `nom`
+                        or hand-rolled; case-insensitive keys)    (Phase 2)
+  auks-client/          AuksClient: connect/retry/failover, ping/add/get/
+                        remove/dump, helper-script runner         (Phase 2)
+  auks-spank/           cdylib → auks.so                          (Phase 1-2)
+  auks-cli/             `auks` binary incl. `-R loop` renewer     (Phase 3)
+  auksd/                daemon: acceptor + worker pool (std threads, no
+                        async runtime needed at this scale), repo, cleaner,
+                        on-disk aukscc_<uid> FILE ccaches         (Phase 4)
+  auksdrenewer/                                                    (Phase 4)
+```
+
+`pam_auks` stays in C (it only does ADD and is 200 lines) until `auks-client`
+is stable; then it becomes a thin cdylib using the same crate, as a Phase 4
+follow-up.
 
 ## Phases
 
-### Phase 0 — safety net (no behaviour change)
+### Phase 0 — safety net (C, no behaviour change)
 
-* CI: add `--with-slurm` build against a pinned Slurm (`slurm-dev`/`slurm-
-  devel`); fail the build on warnings for the plugin (`-Wall -Wextra
-  -Wformat=2 -Werror`) — this alone catches A5.
-* Fix A5 (missing `%u` argument), A4 (`umask(077)`), guard `kill()` in
-  `task_exit`.
-* Compose: add a minimal Slurm node (`slurmctld` + `slurmd` on the client
-  container, `munge`), plugstack with `auks.so required`, and a bats test:
-  `srun --auks=yes klist` shows the forwarded principal;
-  `srun --auks=no klist` fails; step exit destroys the ccache.
-* Verify the Audit D items and record the answers in `AUDIT.md`.
+* CI: build `auks.so` with `--with-slurm` against a pinned Slurm; plugin
+  compiled with `-Wall -Wextra -Wformat=2 -Werror` (catches A5).
+* Fix A5 (`%u` argument), A4 (`umask(077)`), guard `kill()` in `task_exit`.
+* Compose: Slurm node + `auks.so required` + bats: `srun --auks=yes klist`
+  shows the principal; `--auks=no` fails; ccache destroyed at step end.
+* Settle Audit D items (CLONE_VM, `job_container/tmpfs`, KEYRING ownership)
+  and record answers in `AUDIT.md`. Decide D4's ctx-in-memory vs state-file.
+* Capture golden wire vectors from the C client/daemon (`tcpdump` of the
+  post-`rd_priv` plaintext via a debug hook, or unit-level `auks_buffer`
+  dumps) for `auks-proto` tests.
 
-### Phase 1 — restructure without changing semantics
+### Phase 1 — Rust foundations + plugin skeleton
 
-* Introduce `struct auks_spank_conf` (parsed once) and `struct
-  auks_spank_ctx` (per step). Delete the twelve globals.
-* Replace prefix `strncmp` option parsing with a table (`key`, `has_value`,
-  `handler`); unknown keys → `slurm_error` + `ESPANK_BAD_ARG`.
-* Make `SLURM_SPANK_AUKS` handling explicit: client always sets it with
-  `overwrite=1`; remote reads it into a bounded buffer and rejects unknown
-  values; `--auks=` given on the remote side wins over env.
-* Move ccache creation + store + helper + `spank_setenv` from `init` to
-  `user_init`; keep the GET where it is for now (root, `init_post_opt`),
-  passing the `auks_cred_t` via ctx (decision 3a). Drop the per-thread
-  `syscall(SYS_setresuid)` helpers.
-* Renewer lifecycle per decision 4; `task_exit` no longer counts tasks —
-  `slurm_spank_exit` (remote) is the single teardown point, with
-  `task_exit` on the last task as an early optimisation only.
-* Replace `sync()` with `fsync` on the ccache fd (FILE type) — keep `sync=`
-  as a deprecated alias that logs a warning.
-* Remove `force_file_ccache`; `krb5_cc_new_unique` with the *user's*
-  default ccache type (resolve via `krb5_cc_default_name` after the uid
-  switch, i.e. honouring `default_ccache_name` templates like
-  `/run/user/%{uid}/…` or `KEYRING:persistent:%{uid}`) is the only path.
-  `no_cc_switch` stays.
-* Existing bats tests must pass unchanged; the new Slurm tests must pass.
+* `auks-krb5-sys`, `auks-krb5`, `auks-proto`, `auks-cred` with unit tests
+  against the golden vectors.
+* `auks-spank` exporting the SPANK ABI (D3) and implementing **only** mode
+  decision + `spank_setenv` passthrough; loaded by the compose Slurm to
+  prove the ABI, option registration (`--auks=`), `plugstack.conf` parsing
+  and logging. Deliverable: Rust `auks.so` loads and behaves as a no-op
+  with `default=disabled`.
+* Autotools `--enable-rust` plumbing; RPM builds both artefacts.
 
-### Phase 2 — behaviour fixes that operators will notice
+### Phase 2 — Rust plugin at parity, C plugin retired
 
-* `spankstackcred=yes`: instead of `setenv` in `slurmstepd`, publish the
-  ccache path through `spank_job_control_setenv`/`spank_setenv` under a
-  documented name (`AUKS_KRB5CCNAME`) and leave `KRB5CCNAME` of the root
-  process alone; document the change for downstream plugins.
-* `enforced`: rename to `strict`, apply on both sides (missing client cred
-  and failed remote GET are both errors).
-* Batch/`--export=NONE` path: set `SLURM_SPANK_AUKS` via
-  `spank_job_control_setenv` so it survives environment filtering
-  **[verify]** Slurm forwards `SLURM_SPANK_*` job-control vars regardless of
-  `--export`.
-* Structured logging: one `slurm_info` per phase with jobid/stepid/uid; debug
-  details behind `slurm_debug2`.
-* Update `slurm-spank-auks.conf`, `auks.so.8`, `HOWTO`.
+* `auks-client` (connect/retry/failover/`GET`), `auks-config`.
+* Full D4/D5 lifecycle in `auks-spank`. Compatibility shims: accept all
+  current `plugstack.conf` args; `force_file_ccache`, `sync=` accepted with
+  a deprecation warning and no effect; `spankstackcred=yes` publishes
+  `AUKS_KRB5CCNAME` via `spank_setenv`/`spank_job_control_setenv` instead of
+  mutating `slurmstepd`'s env (documented change for downstream plugins).
+* `enforced` → `strict` (alias kept), applies to both client add failure
+  and remote GET failure. `SLURM_SPANK_AUKS` set with overwrite; remote
+  `--auks=` wins over env.
+* Renewer still the **C** `auks -R loop` at this stage (spawned by the Rust
+  plugin) — this keeps the phase to one component.
+* Gate: Slurm bats suite green with Rust plugin against the C daemon;
+  `tests/simple.bats` untouched and green.
+* Delete `src/plugins/slurm/`; update `slurm-spank-auks.conf`, `auks.so.8`,
+  `HOWTO`.
 
-### Phase 3 — daemon-side hardening (independent PR series)
+### Phase 3 — Rust CLI and renewer
 
-* B1: pass the peer address into `auks_acl_get_role` (from `getpeername`)
-  or delete the `host` field from the ACL grammar and docs. Deleting is
-  simpler and honest; passing the address is what the docs promise. Either
-  way, stop calling `getaddrinfo` on the request path (resolve at ACL load).
-* B2: anchor principal regexes at load time (`^(…)$`) unless the rule is
-  `*`; precompile.
-* B4: add a `REMOVE`-on-job-end hook — the plugin's `slurm_spank_exit` on
-  the *batch* step (or a `slurmctld` epilog) can REMOVE when the job's last
-  step ends. Requires care with multi-job users: REMOVE only if no other
-  running job of that uid exists → needs an `squeue`-style check or a
-  refcount in auksd. Defer until A1 is designed.
+* `auks-cli`: same flags as `src/auks/auks.c` (`-p -a -g -r -d -R once|loop
+  -u -C -f -v …`), same exit codes/messages where scripts may depend on
+  them; `-R loop` gets `SIGTERM` handling, jitter, and structured logging.
+* Gate: full `tests/simple.bats` green with Rust CLI ↔ C daemon **and**
+  C CLI ↔ C daemon (unchanged). Delete `src/auks/`.
 
-### Phase 4 — job-scoped authorisation (design item, A1)
+### Phase 4 — Rust daemon
 
-The current model (compute host = admin = read any uid) is the largest
-residual risk and cannot be fixed by the plugin alone. Candidate designs,
-to be evaluated in a design doc before code:
+* `auksd`: `krb5_recvauth` via `auks-krb5`; ACL with the B1/B2 fixes
+  (peer address actually passed; regexes anchored and precompiled at load;
+  no DNS on the request path); repository with the same `aukscc_<uid>`
+  on-disk format so a C→Rust daemon switch keeps existing creds; cleaner;
+  `Workers`/`QueueSize`/`RepoSize`/`CleanDelay` honoured. Same systemd unit.
+* `auksdrenewer`.
+* Gate: 2×2 differential matrix (C/Rust client × C/Rust daemon) green;
+  `auks -d` output identical. Delete `src/auksd/`, `src/api/`, confparse,
+  xternal; autotools reduced to PAM, or replaced by Cargo + a `Makefile`
+  for install layout (decide then).
+* `pam_auks` as Rust cdylib (follow-up).
 
-* **Ticket from the controller.** A `slurmctld`-side SPANK/`job_submit`
-  plugin (or `slurmctld` prolog) asks auksd for a per-job token (HMAC over
-  `jobid,uid,expiry` under a key shared with auksd) and puts it in the job
-  environment; `slurmstepd` presents `GET uid,token` and auksd grants
-  `user`-equivalent rights for that uid only. Removes `admin` from compute
-  nodes entirely. Needs a new message type and a token key in auksd.
-* **Slurm-verified GET.** auksd validates the request against `slurmctld`
-  (`slurm_load_job` + check that `uid` has a running job allocated to the
-  requesting host). Simpler, no new secret, but couples auksd to Slurm and
-  adds a controller RPC per step launch.
-* **Per-user forwarding without auksd.** Use Kerberos constrained
-  delegation or a per-job service ticket instead of forwarding the TGT.
-  Largest change; would make auksd a cache rather than a vault.
+### Phase 5 — protocol v2 and job-scoped authorisation (design first)
+
+Requires a design doc before code. Candidates from the audit (A1):
+
+* **Controller-minted token**: `slurmctld`-side plugin/prolog obtains a
+  per-job token (HMAC over `jobid,uid,expiry`) from auksd and puts it in
+  the job env; `slurmstepd` sends `GET uid,token`; compute hosts lose
+  `admin`. New message type → natural point to also introduce GSSAPI
+  framing (`libgssapi`) with version negotiation on connect.
+* **Slurm-verified GET**: auksd checks with `slurmctld` that `uid` has a
+  running job on the requesting host. No new secret, but a controller RPC
+  per step launch.
+* **REMOVE on job end** (B4) rides on whichever design gives auksd a job
+  notion.
 
 Decision criteria: no new long-lived secrets on compute nodes, no
 per-step RPC to `slurmctld` on hot paths, works for `sbatch` jobs whose
-`srun` steps start hours later.
+`srun` steps start hours later, old C clients keep working until removed.
+
+## Ecosystem survey (checked at planning time)
+
+| Need | Option | Verdict |
+|---|---|---|
+| libkrb5 FFI | `krb5-sys` 0.3.0 (2019, MIT, "incomplete") · `libkrb5-sys`/`libkrb5` 0.0.3 (2022, unmaintained, safe layer "very limited") · `kerberos-sys` 0.1.1 (2024, GPL-3.0) · `kurbu5-sys` 0.1.4 (2026, BSD-2, very new, targets KDC plugin dev) · `krb5-src` (vendors krb5 1.19.2) | Own bindgen crate (D1) |
+| GSSAPI | `libgssapi` 0.11 (MIT, maintained, ~1 M dl) · `cross-krb5` 0.5 (adds SSPI) · `sspi` 0.21 (native, MSRV 1.89) | `libgssapi` for protocol v2 only (Phase 5) |
+| SPANK ABI | `slurm-spank` 0.4.1 (Apache-2.0, 2025-11, `SPANK_PLUGIN!` + typed `get_item`) · `slurm-banking-plugins` (bindgen example) | Prototype on `slurm-spank`, fallback own shim (D3) |
+| Pure-Rust Kerberos | `krb5-rs` 0.1.0 (renewal not implemented) · `rskrb5` 0.2.0 (renewal advertised, ~94 dl) · `kerbeiros` (AGPL) · `picky-krb` (ASN.1 only, MSRV 1.85) · `kerbcore` (1.88+) | Not now; revisit for Phase 5+ |
+| Toolchain | EL8: Rust 1.75 · EL9: 1.79–1.88 · RHEL Rust Toolset modules | MSRV 1.75 pending Q1 |
 
 ## Non-goals
 
-* Rewriting `libauksapi` or the wire protocol beyond the new message(s)
-  needed for Phase 4.
-* PAM module changes (it only does ADD; unaffected).
+* Changing the wire protocol or on-disk repository format before Phase 5.
+* Rewriting `aukspriv` (bash) — it is a `kinit -k` loop and fine as is.
+* Windows/SSPI support.
 * Supporting Slurm older than the version pinned in CI.
 
 ## Open questions for Bryce
 
-1. Target Slurm version(s) to support — determines the CLONE_VM answer and
-   which `spank_*` helpers are available.
-2. Is `job_container/tmpfs` in use? It changes the priority of moving
-   ccache creation into `user_init`.
-3. Default ccache type on compute nodes today (FILE in `/tmp`, KEYRING, KCM,
-   `/run/user`)? Drives the `krb5_cc_new_unique` policy in Phase 1.
-4. Is Phase 4 in scope for this effort, or is the plugin rewrite (0-2) the
-   deliverable with A1 tracked separately?
+1. Toolchain floor: must this build with the distro Rust on AlmaLinux 8
+   (1.75), or can packaging require the Rust Toolset module / a newer EL9
+   compiler? This sets MSRV and edition.
+2. Target Slurm version(s) — determines the CLONE_VM answer (D4) and which
+   `spank_*` helpers exist.
+3. Is `job_container/tmpfs` in use? Raises the priority of D4's
+   `user_init` move.
+4. Default ccache type on compute nodes (FILE in `/tmp`, KEYRING, KCM,
+   `/run/user`)?
+5. Is Phase 5 (job-scoped auth / protocol v2) in scope for this effort or
+   tracked separately?
+6. Should the C components be deleted as each Rust one lands (as planned
+   above), or kept in-tree behind `--disable-rust` for one release cycle?
