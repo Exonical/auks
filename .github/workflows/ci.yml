@@ -34,6 +34,37 @@ jobs:
             CFLAGS="-Wall -Wextra -Wformat=2 -Werror"
           rust/golden/regen.sh
 
+  autotools-rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            autoconf \
+            automake \
+            libtool \
+            pkg-config \
+            libkrb5-dev \
+            libtirpc-dev \
+            libclang-dev \
+            flex \
+            bison \
+            libslurm-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build and install both Slurm plugins
+        run: |
+          autoreconf -i
+          ./configure --with-slurm --enable-rust
+          make -j"$(nproc)"
+          make DESTDIR="$PWD/dest" install
+          test -f dest/usr/local/lib/slurm/auks_rs.so
+          test -f dest/usr/local/lib/slurm/auks.so
+
   compose-tests:
     runs-on: ubuntu-latest
     steps:

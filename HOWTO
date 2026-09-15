@@ -1,5 +1,8 @@
 This is a short HOWTO explaining how to set up a simple solution using AUKS and Slurm.
 
+The Rust Slurm SPANK plugin is optional and can be built alongside the C
+plugin with `./configure --with-slurm --enable-rust`.
+
 A working solution requires 3 types of nodes :
 
    - a management node, on which the auks repository will be set up and managed

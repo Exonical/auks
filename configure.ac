@@ -35,6 +35,28 @@ AC_PROG_YACC
 dnl Look after SLURM resource manager
 AX_SLURM
 
+dnl Optional Rust SPANK plugin
+AC_ARG_ENABLE([rust],
+	[AS_HELP_STRING([--enable-rust],
+			[build the Rust Slurm SPANK plugin @<:@default=no@:>@])],
+	[enable_rust=$enableval],
+	[enable_rust=no])
+
+SLURM_PREFIX_FOR_RUST=/usr
+AS_IF([test "x$enable_rust" = "xyes"], [
+	AC_PATH_PROG([CARGO], [cargo])
+	AC_PATH_PROG([RUSTC], [rustc])
+	AS_IF([test -z "$CARGO"], [AC_MSG_ERROR([--enable-rust requires cargo])])
+	AS_IF([test -z "$RUSTC"], [AC_MSG_ERROR([--enable-rust requires rustc])])
+	AS_IF([test "x$ac_have_slurm" != "xyes"],
+		[AC_MSG_ERROR([--enable-rust requires --with-slurm])])
+	AS_IF([test -n "$SLURMDIR" && test "x$SLURMDIR" != "xyes"],
+		[SLURM_PREFIX_FOR_RUST=$SLURMDIR])
+])
+AC_SUBST([CARGO])
+AC_SUBST([SLURM_PREFIX_FOR_RUST])
+AM_CONDITIONAL([ENABLE_RUST], [test "x$enable_rust" = "xyes"])
+
 dnl Look after PAM library
 AX_PAM
 
